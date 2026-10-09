@@ -98,6 +98,8 @@ button { cursor: pointer; }
 }
 .nav-item:hover { background: var(--fill-2); }
 .nav-item[aria-current="page"] { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--blue); font-weight: 600; }
+.nav-item { position: relative; }
+.nav-item[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 4px; border-radius: 0 4px 4px 0; background: var(--blue); }
 .nav-item svg { flex: none; }
 .sidebar .spacer { flex: 1; }
 
@@ -184,7 +186,8 @@ select.field { appearance: none; padding-right: 40px; background-image: url("dat
 
 .segmented { align-self: flex-start; display: inline-flex; padding: 2px; border-radius: 10px; background: var(--fill); gap: 2px; flex-wrap: wrap; }
 .segmented button { min-height: 32px; min-width: 44px; padding: 0 14px; border: 0; border-radius: 8px; background: none; font-size: 13px; font-weight: 600; color: var(--label); }
-.segmented button[aria-pressed="true"] { background: var(--bg-elevated); box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04); }
+.segmented button[aria-pressed="true"] { background: var(--blue); color: #fff; box-shadow: 0 2px 8px color-mix(in srgb, var(--blue) 40%, transparent); }
+.segmented button { transition: background-color .15s ease, color .15s ease; }
 /* Make segmented items reach 44pt tap height with an invisible hit area */
 .segmented button { position: relative; }
 .segmented button::after { content: ""; position: absolute; inset: -6px 0; }
@@ -255,7 +258,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 15px; }
     backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%);
   }
   .tabbar button { flex: 1; min-height: 56px; border: 0; background: none; border-radius: 26px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 11px; font-weight: 600; color: var(--label-2); }
-  .tabbar button[aria-current="page"] { color: var(--blue); background: var(--fill-2); }
+  .tabbar button { position: relative; }
+  .tabbar button[aria-current="page"] { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+  .tabbar button[aria-current="page"]::after { content: ""; position: absolute; top: 3px; left: 50%; width: 20px; height: 3px; margin-left: -10px; border-radius: 2px; background: var(--blue); }
   .swap { grid-template-columns: 1fr; }
   .swap .arrow { transform: rotate(90deg); justify-self: center; }
 }
