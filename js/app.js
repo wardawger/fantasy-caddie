@@ -270,6 +270,11 @@ function renderApp() {
       <button class="nav-item" data-action="signout">${icon('logout', 22)}<span>${S.ctx.demo ? 'Exit demo' : 'Sign out'}</span></button>
     </nav>
     <main id="main">
+      <button class="switcher only-mobile" data-action="menu" aria-haspopup="dialog" aria-label="Switch league or team">
+        <span class="brand-mark">${icon('football', 18)}</span>
+        <span class="switcher-text"><b>${esc(S.ctx.teamName(S.me.roster_id))}</b><small>${esc(L.name)}</small></span>
+        ${icon('chevronDown', 18)}
+      </button>
       <div class="page-head">
         <div><div class="eyebrow">Week ${S.ctx.week} · ${esc(L.name)}</div><h1 class="large-title">${tab.label}</h1></div>
         ${S.ctx.demo ? '<span class="chip blue">Sample data</span>' : ''}
@@ -576,31 +581,64 @@ function viewRoster() {
 let sheet = null;
 const sheetRoot = () => document.getElementById('sheet-root');
 
-function sheetHtml(id) {
-  const p = P(id), v = V(id);
-  const delta = v.breakdown.final - v.breakdown.base;
+function sheetShell({ badge, title, sub, trail = '', body }) {
   return `<div class="sheet-backdrop" data-sheet-close></div>
   <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1">
     <header class="sheet-head">
       <div class="sheet-grab" aria-hidden="true"><span></span></div>
       <div class="row" style="gap:12px;align-items:center">
-        <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
-        <div style="flex:1;min-width:0"><h2 id="sheet-title" class="title3" style="margin:0">${esc(p.name)}</h2>
-          <div class="meta secondary subhead">${esc([p.team ?? 'FA', v.opponent ? `vs ${v.opponent}` : null, gameLabel(v)].filter(Boolean).join(' · '))}</div></div>
-        <div class="trail"><div class="title2 num">${f1(v.week)}</div><div class="caption num ${cls(delta)}">${signed(delta)} vs base</div></div>
+        ${badge}
+        <div style="flex:1;min-width:0"><h2 id="sheet-title" class="title3" style="margin:0">${esc(title)}</h2>
+          <div class="meta secondary subhead">${esc(sub)}</div></div>
+        ${trail}
       </div>
     </header>
     <button class="sheet-close" data-sheet-close aria-label="Close">${icon('close', 20)}</button>
-    <div class="sheet-body">${breakdownPanel(id)}</div>
+    <div class="sheet-body">${body}</div>
   </section>`;
 }
 
+function playerSheet(id) {
+  const p = P(id), v = V(id);
+  const delta = v.breakdown.final - v.breakdown.base;
+  return sheetShell({
+    badge: `<span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>`,
+    title: p.name, sub: [p.team ?? 'FA', v.opponent ? `vs ${v.opponent}` : null, gameLabel(v)].filter(Boolean).join(' · '),
+    trail: `<div class="trail"><div class="title2 num">${f1(v.week)}</div><div class="caption num ${cls(delta)}">${signed(delta)} vs base</div></div>`,
+    body: breakdownPanel(id),
+  });
+}
+
+/** League switcher: every league on the account, plus refresh and sign out. */
+function menuSheet() {
+  const cur = S.ctx.league.league_id;
+  const leagues = S.leagues.length ? S.leagues : [S.ctx.league];
+  const item = (attrs, ic, name, meta, trail = '') => `<li class="interactive" ${attrs} role="button" tabindex="0">
+    <span class="pbadge slot">${icon(ic, 22)}</span><div class="grow"><div class="name">${esc(name)}</div><div class="meta">${esc(meta)}</div></div>${trail}</li>`;
+  const body = `<ul class="list plain bleed">${leagues.map(l => item(`data-menu="league" data-id="${esc(l.league_id)}"`, 'trophy', l.name,
+      `${l.total_rosters} teams · ${l.season} · ${E.usesFab(l) ? 'FAB waivers' : 'Rolling waivers'}`,
+      l.league_id === cur ? `<span class="chip blue">${icon('check', 12)}Current</span>` : `<span class="secondary">${icon('chevron', 16)}</span>`)).join('')}</ul>
+    <ul class="list plain bleed" style="margin-top:var(--s2)">
+      ${S.ctx.demo ? '' : item('data-menu="refresh"', 'refresh', 'Refresh data', 'Reload rosters, projections and lines')}
+      ${item('data-menu="signout"', 'logout', S.ctx.demo ? 'Exit sample league' : 'Switch Sleeper account', S.ctx.demo ? 'Back to sign in' : `Signed in as ${S.user?.display_name ?? ''}`)}
+    </ul>`;
+  return sheetShell({
+    badge: `<span class="brand-mark">${icon('football', 20)}</span>`,
+    title: 'Your leagues', sub: S.ctx.demo ? 'Sample league' : `${leagues.length} league${leagues.length === 1 ? '' : 's'} on Sleeper`, body,
+  });
+}
+
 function openSheet(id) {
-  if (sheet || !V(id)) return;
+  if (V(id)) showSheet(playerSheet(id), `[data-why="${CSS.escape(id)}"]`);
+}
+function openMenu() { showSheet(menuSheet(), '[data-action="menu"]'); }
+
+function showSheet(html, focusSel) {
+  if (sheet) return;
   const root = sheetRoot();
-  root.innerHTML = sheetHtml(id);
+  root.innerHTML = html;
   const bd = root.querySelector('.sheet-backdrop'), sh = root.querySelector('.sheet');
-  sheet = { id, bd, sh, closing: false };
+  sheet = { focusSel, bd, sh, closing: false };
   document.body.classList.add('sheet-open');
   sh.getBoundingClientRect(); // commit the off-screen start position before animating in
   requestAnimationFrame(() => { bd.classList.add('open'); sh.classList.add('open'); sh.querySelector('.sheet-close').focus({ preventScroll: true }); });
@@ -620,14 +658,14 @@ function openSheet(id) {
 
 function closeSheet(immediate = false) {
   if (!sheet || sheet.closing) return;
-  const { id, bd, sh } = sheet;
+  const { focusSel, bd, sh } = sheet;
   sheet.closing = true;
   const done = () => {
     if (!sheet || sheet.sh !== sh) return;
     sheetRoot().innerHTML = '';
     document.body.classList.remove('sheet-open');
     sheet = null;
-    if (!immediate) document.querySelector(`[data-why="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+    if (!immediate) document.querySelector(focusSel)?.focus({ preventScroll: true });
   };
   if (immediate) return done();
   bd.classList.remove('open');
@@ -637,6 +675,19 @@ function closeSheet(immediate = false) {
 }
 
 document.addEventListener('click', (e) => { if (e.target.closest('[data-sheet-close]')) closeSheet(); });
+function signOut() { store.set('league', null); setState({ screen: 'onboard', ctx: null, user: null, leagues: [], error: null }); }
+sheetRoot().addEventListener('click', (e) => {
+  const el = e.target.closest('[data-menu]');
+  if (!el) return;
+  const a = el.dataset.menu;
+  closeSheet(true);
+  if (a === 'league') { if (el.dataset.id !== S.ctx.league.league_id) openLeague(el.dataset.id); }
+  else if (a === 'refresh') openLeague(S.ctx.league.league_id);
+  else if (a === 'signout') signOut();
+});
+sheetRoot().addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('li[role="button"]')) { e.preventDefault(); e.target.click(); }
+});
 document.addEventListener('keydown', (e) => {
   if (!sheet) return;
   if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
@@ -677,7 +728,8 @@ $app.addEventListener('click', (e) => {
   const a = el.dataset.action;
   if (a === 'demo') startDemo();
   else if (a === 'league') openLeague(el.dataset.id);
-  else if (a === 'signout') { store.set('league', null); setState({ screen: 'onboard', ctx: null, user: null, leagues: [], error: null }); }
+  else if (a === 'signout') signOut();
+  else if (a === 'menu') openMenu();
   else if (a === 'refresh') openLeague(S.ctx.league.league_id);
   else if (a === 'open-trade') {
     const t = trades()[+el.dataset.i];
