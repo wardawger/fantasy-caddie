@@ -44,7 +44,10 @@ All multiplier sizes are my own estimates, not fitted to historical data.
 - ESPN's public site API (`site.api.espn.com`) for betting lines, kickoff times/state and player news (keyless, undocumented). If it fails, those signals are dropped and shown as unavailable.
 - Open-Meteo for stadium forecasts (keyless).
 - Expert rankings: `netlify/functions/rankings.mjs` fetches them server-side (those sites don't allow browser CORS) and returns each source's rows plus per-URL status. Pages are picked from your league settings: Sleeper `rec` scoring → standard / half-PPR / PPR; `SUPER_FLEX` or two QB slots → superflex pages; team count → FFC ADP size. The sources' terms of use may restrict automated access, and their markup can change, so each source reports Loaded/Failed in the app. Sources can be switched off, and a CSV import is always available.
-  - FantasyPros: reads the `ecrData` JSON embedded in the rankings page. CBS: parses the rankings table. Draft Sharks: looks for embedded app data (mostly premium, so it will often fail). FFC: uses its public ADP JSON API (draft-position value, so weighted 0.5).
+    - FantasyPros: reads the `ecrData` JSON embedded in the weekly rankings page (flex, plus QB/K/DST pages).
+  - CBS Sports: parses the server-rendered weekly rankings tables (`/rankings/{ppr|standard}/{flex|QB|K|DST}/weekly/`). CBS has no half-PPR pages, so half-PPR leagues use PPR.
+  - Draft Sharks: parses the top 25 rows of each position page (`/rankings/{ppr|half-ppr}/{qb|rb|wr|te|k|def}`); the rest is premium. These are rest-of-season rankings, so it gets half weight.
+  - Fantasy Football Calculator: public ADP JSON API. Draft-position value, so it gets a quarter weight.
   - Responses are cached for 30 minutes at Netlify's CDN and in your browser.
 
 ## Develop

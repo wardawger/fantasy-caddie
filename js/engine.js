@@ -42,29 +42,41 @@ export function remainingWeeks(week) {
 // built from weekly box scores so far. Shrunk toward 1 because Sleeper's own
 // projections already account for the opponent partly.
 export function buildDvP(weeklyStats, players, scoring) {
-  const allowed = {}; // team -> pos -> [sum, n]
-  const posTotal = {};
-  for (const wk of weeklyStats) {
+  // Points each defense allowed to each position per game: sum every opposing
+  // player's points in a game, then average over the games played. (Averaging per
+  // player would just measure how many scrubs happened to be listed.)
+  const perGame = {}; // team -> pos -> [week -> pts]
+  const weeksSeen = {}; // team -> number of weeks it appears as an opponent
+  weeklyStats.forEach((wk, w) => {
+    const seen = new Set();
     for (const [id, row] of Object.entries(wk)) {
       const p = players[id];
       if (!p || !row.opponent) continue;
+      seen.add(row.opponent);
       const pts = fantasyPoints(row.stats, scoring);
-      if (pts <= 0 && !row.stats?.gp) continue;
-      const a = ((allowed[row.opponent] ??= {})[p.pos] ??= [0, 0]);
-      a[0] += pts; a[1] += 1;
-      const t = (posTotal[p.pos] ??= [0, 0]);
-      t[0] += pts; t[1] += 1;
+      const t = ((perGame[row.opponent] ??= {})[p.pos] ??= []);
+      t[w] = (t[w] ?? 0) + pts;
+    }
+    for (const t of seen) weeksSeen[t] = (weeksSeen[t] ?? 0) + 1;
+  });
+  const avgOf = (arr) => { const v = arr.filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const teamAvg = {}; const lg = {};
+  for (const [team, byPos] of Object.entries(perGame)) {
+    for (const [pos, arr] of Object.entries(byPos)) {
+      const a = avgOf(arr); if (a == null) continue;
+      (teamAvg[team] ??= {})[pos] = a;
+      (lg[pos] ??= []).push(a);
     }
   }
   const out = {};
-  for (const [team, byPos] of Object.entries(allowed)) {
+  for (const [team, byPos] of Object.entries(teamAvg)) {
     out[team] = {};
-    for (const [pos, [sum, n]] of Object.entries(byPos)) {
-      const avg = posTotal[pos][0] / posTotal[pos][1];
-      if (!avg) continue;
-      const raw = (sum / n) / avg;
-      const trust = Math.min(n / (weeklyStats.length * 3 || 1), 1) * 0.5;
-      out[team][pos] = 1 + (raw - 1) * trust;
+    const trust = Math.min((weeksSeen[team] ?? 0) / 8, 1) * 0.6; // early season: mostly neutral
+    for (const [pos, a] of Object.entries(byPos)) {
+      const league = avgOf(lg[pos]);
+      if (!league) continue;
+      const m = 1 + (a / league - 1) * trust;
+      out[team][pos] = Math.min(1.15, Math.max(0.85, m));
     }
   }
   return out;
@@ -114,7 +126,8 @@ export function buildValues(ctx) {
     const wp = ctx.weekProj?.[p.id];
     const sp = ctx.seasonProj?.[p.id];
     const st = ctx.seasonStats?.[p.id];
-    const projGames = sp?.stats?.gp || 17;
+    // Sleeper's season projections report gp=18 (weeks, not games); a team plays 17.
+    const projGames = Math.min(sp?.stats?.gp || 17, 17);
     const projRate = sp ? fantasyPoints(sp.stats, scoring) / projGames : 0;
     const actualRate = st?.games ? st.pts / st.games : null;
     const wkPts = wp ? fantasyPoints(wp.stats, scoring) : null;

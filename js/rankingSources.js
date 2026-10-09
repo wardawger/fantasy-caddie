@@ -81,30 +81,41 @@ function planFantasyPros(p) {
   return out;
 }
 
-// ---------- CBS Sports (expert rankings tables) ----------
+// ---------- CBS Sports (server-rendered FantasyRankingsTable) ----------
+// Pages (verified against the live site): /fantasy/football/rankings/{ppr|standard}/{flex|QB|K|DST}/weekly/
+// Flex rows carry "RB12"-style position ranks; position pages carry only the overall order.
+// CBS has no half-PPR pages, so half-PPR leagues use the PPR rankings.
+
+const NICK = { Cardinals: 'ARI', Falcons: 'ATL', Ravens: 'BAL', Bills: 'BUF', Panthers: 'CAR', Bears: 'CHI', Bengals: 'CIN', Browns: 'CLE', Cowboys: 'DAL', Broncos: 'DEN', Lions: 'DET', Packers: 'GB', Texans: 'HOU', Colts: 'IND', Jaguars: 'JAX', Chiefs: 'KC', Raiders: 'LV', Chargers: 'LAC', Rams: 'LAR', Dolphins: 'MIA', Vikings: 'MIN', Patriots: 'NE', Saints: 'NO', Giants: 'NYG', Jets: 'NYJ', Eagles: 'PHI', Steelers: 'PIT', '49ers': 'SF', Seahawks: 'SEA', Buccaneers: 'TB', Titans: 'TEN', Commanders: 'WAS' };
 
 export function parseCBS(html, kind) {
   const rows = [];
-  const re = /CellPlayerName-name[^>]*>([\s\S]{0,300}?)<\/(?:span|div)>[\s\S]{0,600}?CellPlayerName-position[^>]*>\s*([A-Za-z/]{1,4})\s*<[\s\S]{0,300}?CellPlayerName-team[^>]*>\s*([A-Za-z]{2,4})\s*</g;
-  let m, n = 0;
-  while ((m = re.exec(html))) {
-    n++;
-    rows.push({ name: decode(m[1]), team: normTeam(m[3]), pos: normPos(m[2]), rank: n, posRank: null });
+  const trs = html.match(/<tr[^>]*class="[^"]*FantasyRankingsTable-row(?!--header)[^"]*"[^>]*>[\s\S]*?<\/tr>/g) ?? [];
+  for (const tr of trs) {
+    const cell = (c) => tr.match(new RegExp(`td--${c}"[^>]*>([\\s\\S]*?)<\\/td>`))?.[1];
+    const rank = parseInt(decode(cell('rank')), 10);
+    // The name span holds both "Jahmyr " and a mobile-only initial ("J. ") before the surname.
+    const nameHtml = tr.match(/FantasyRankingsTable-playerName[^>]*>([\s\S]*?)(?:<\/a>|<span class="FantasyRankingsTable-icons|<\/div>)/)?.[1] ?? '';
+    const name = decode(nameHtml.replace(/<span[^>]*FirstInitial[^>]*>[\s\S]*?<\/span>/gi, ''));
+    if (!name || !Number.isFinite(rank)) continue;
+    let team = decode(tr.match(/FantasyRankingsTable-teamPosition[^>]*>([\s\S]*?)<\/span>/)?.[1] ?? '');
+    const pm = decode(cell('pos') ?? '').match(/^([A-Z]+)(\d+)?$/);
+    let pos = pm ? normPos(pm[1]) : normPos(kind);
+    // Defenses have no team span: use the logo file name (…/HOU.png), else the nickname.
+    if (pos === 'DEF') team = tr.match(/logos\/\d+x\d+\/([A-Za-z]{2,4})\.png/)?.[1] ?? NICK[name] ?? team;
+    if (!['QB', 'RB', 'WR', 'TE', 'K', 'DEF'].includes(pos)) continue;
+    rows.push({ name, team: normTeam(team), pos, rank, posRank: pm?.[2] ? +pm[2] : null });
   }
   if (rows.length) return withPosRanks(rows);
   for (const f of [() => parseTables(html, kind), () => parseEmbeddedJSON(html)]) { try { return f(); } catch { /* next */ } }
-  throw new Error('no ranking rows found (page may be client-rendered)');
+  throw new Error('no ranking rows found (page layout may have changed)');
 }
 
 function planCBS(p) {
   const base = 'https://www.cbssports.com/fantasy/football/rankings/';
-  const fmt = { std: 'standard', half: 'half-ppr', ppr: 'ppr' }[p.scoring];
-  const positions = ['QB', 'RB', 'WR', 'TE', ...(p.hasK ? ['K'] : []), ...(p.hasDef ? ['DST'] : [])];
-  return positions.map(pos => ({
-    kind: pos,
-    // Tried in order until one returns rows; the first is the page layout I'd expect.
-    candidates: [`${base}${fmt}/${pos}/`, `${base}${fmt}/${pos}/weekly/`, `${base}${pos}/`],
-  }));
+  const fmt = p.scoring === 'std' ? 'standard' : 'ppr';
+  const mk = (kind, path) => ({ kind, candidates: [`${base}${fmt}/${path}/weekly/`] });
+  return [mk('flex', 'flex'), mk('QB', 'QB'), ...(p.hasK ? [mk('K', 'K')] : []), ...(p.hasDef ? [mk('DST', 'DST')] : [])];
 }
 
 // ---------- Draft Sharks (embedded app data; mostly premium) ----------
@@ -188,16 +199,29 @@ export function parseTables(html, kind) {
   return withPosRanks(best);
 }
 
+// Draft Sharks server-renders only the top 25 rows of each ranking page (the rest is premium), and
+// these are rest-of-season rankings rather than weekly ones. Pages (verified): /rankings/{ppr|half-ppr}/{qb|rb|wr|te|k|def}.
+// There is no standard-scoring page, so standard leagues use half-PPR.
 export function parseDraftSharks(html, kind) {
-  const attempts = [() => parseEmbeddedJSON(html), () => parseTables(html, kind)];
-  for (const f of attempts) { try { return f(); } catch { /* try the next strategy */ } }
+  const rows = [];
+  for (const tr of html.match(/<tr[^>]*class="[^"]*player-row[^"]*"[^>]*>[\s\S]*?<\/tr>/g) ?? []) {
+    const rank = parseInt(decode(tr.match(/rank-index[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? ''), 10);
+    const first = tr.match(/first-name="([^"]*)"/)?.[1] ?? '', last = tr.match(/last-name="([^"]*)"/)?.[1] ?? '';
+    const spot = tr.match(/pos-roster-spot="([A-Z/]+)"[^>]*>\s*(\d+)\s*</);
+    const team = tr.match(/player-details-group__team-name[^>]*>\s*([A-Za-z]{2,4})\s*</)?.[1] ?? null;
+    const name = decode(`${first} ${last}`);
+    if (!name || !Number.isFinite(rank)) continue;
+    rows.push({ name, team: normTeam(team), pos: normPos(spot?.[1] ?? kind), rank, posRank: spot ? +spot[2] : null });
+  }
+  if (rows.length) return withPosRanks(rows);
+  for (const f of [() => parseEmbeddedJSON(html), () => parseTables(html, kind)]) { try { return f(); } catch { /* next */ } }
   throw new Error('no ranking data in page (rankings are likely premium or rendered client-side)');
 }
 
 function planDraftSharks(p) {
-  const base = 'https://www.draftsharks.com/rankings';
-  const fmt = { std: 'standard', half: 'half-ppr', ppr: 'ppr' }[p.scoring];
-  return [{ kind: 'all', candidates: [`${base}/${fmt}${p.superflex ? '/superflex' : ''}`, `${base}/${fmt}`, base] }];
+  const fmt = p.scoring === 'ppr' ? 'ppr' : 'half-ppr';
+  const mk = (kind, path) => ({ kind, candidates: [`https://www.draftsharks.com/rankings/${fmt}/${path}`] });
+  return [mk('QB', 'qb'), mk('RB', 'rb'), mk('WR', 'wr'), mk('TE', 'te'), ...(p.hasK ? [mk('K', 'k')] : []), ...(p.hasDef ? [mk('DEF', 'def')] : [])];
 }
 
 // ---------- Fantasy Football Calculator (ADP JSON API) ----------
@@ -223,9 +247,9 @@ function planFFC(p, { season }) {
 
 export const SOURCES = [
   { id: 'fp', name: 'FantasyPros', weight: 1, home: 'https://www.fantasypros.com/nfl/rankings/half-point-ppr-flex.php', plan: planFantasyPros, parse: parseFantasyPros },
-  { id: 'cbs', name: 'CBS Sports', weight: 1, home: 'https://www.cbssports.com/fantasy/football/rankings/', plan: planCBS, parse: parseCBS },
-  { id: 'ds', name: 'Draft Sharks', weight: 1, home: 'https://www.draftsharks.com/rankings', plan: planDraftSharks, parse: parseDraftSharks },
-  { id: 'ffc', name: 'Fantasy Football Calculator (ADP)', weight: 0.5, home: 'https://fantasyfootballcalculator.com/rankings/standard', plan: planFFC, parse: parseFFC },
+  { id: 'cbs', name: 'CBS Sports', weight: 1, home: 'https://www.cbssports.com/fantasy/football/rankings/ppr/flex/weekly/', plan: planCBS, parse: parseCBS },
+  { id: 'ds', name: 'Draft Sharks (top 25 per position, rest of season)', weight: 0.5, home: 'https://www.draftsharks.com/rankings', plan: planDraftSharks, parse: parseDraftSharks },
+  { id: 'ffc', name: 'Fantasy Football Calculator (ADP)', weight: 0.25, home: 'https://fantasyfootballcalculator.com/rankings/standard', plan: planFFC, parse: parseFFC },
 ];
 
 /**

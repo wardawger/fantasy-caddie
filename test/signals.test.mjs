@@ -168,3 +168,16 @@ test('explainMove names both players with base → final and top factors', () =>
   assert.match(lines[0], /^Start .+: \d+\.\d → \d+\.\d pts/);
   assert.match(lines[1], /^Sit /);
 });
+
+test('defense-vs-position uses points allowed per game, shrinks early and is capped at ±15%', () => {
+  const players = { qa: { id: 'qa', pos: 'TE', team: 'A' }, qb: { id: 'qb', pos: 'TE', team: 'B' }, qc: { id: 'qc', pos: 'TE', team: 'C' }, x: { id: 'x', pos: 'TE', team: 'A' } };
+  const scoring = { rec_yd: 0.1 };
+  // Team Z allows 300 receiving yards to TEs each game; Y allows 20; many scrubs listed vs Y shouldn't matter.
+  const wk = () => ({ qa: { opponent: 'Z', stats: { rec_yd: 150 } }, x: { opponent: 'Z', stats: { rec_yd: 150 } }, qb: { opponent: 'Y', stats: { rec_yd: 10 } }, qc: { opponent: 'Y', stats: { rec_yd: 10 } }, ...Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`s${i}`, { opponent: 'Y', stats: { rec_yd: 0 } }])) });
+  for (let i = 0; i < 20; i++) players[`s${i}`] = { id: `s${i}`, pos: 'TE', team: 'C' };
+  const early = E.buildDvP([wk(), wk()], players, scoring);
+  const late = E.buildDvP(Array.from({ length: 10 }, wk), players, scoring);
+  assert.ok(early.Z.TE > 1 && early.Y.TE < 1);
+  assert.ok(early.Z.TE < late.Z.TE, 'more games → more trust');
+  assert.ok(late.Z.TE <= 1.15 && late.Y.TE >= 0.85);
+});
