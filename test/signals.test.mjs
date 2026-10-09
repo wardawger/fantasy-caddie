@@ -221,3 +221,42 @@ test('waiver list ranks skill upgrades above streamers, caps K/DEF rows, and kee
   const skill = E.fabBid({ pos: 'RB', kind: 'hold', gainRos: 80, gainWeek: 10, demand: 8 }, { budget: 100, spent: 0, week: 3, numTeams: 12, starterRos: 100 });
   assert.ok(skill.rec > 5);
 });
+
+test('waiver comparison names the slot, who gets bumped, who to compare with, and why', () => {
+  const c = demoContext();
+  const me = c.rosters[0];
+  const fas = E.freeAgentTargets(me, c.rosters, c.league, c.players, c.values, { limit: 50 });
+  assert.ok(fas.length);
+  for (const target of fas) {
+    const cmp = E.waiverComparison({ target, myRoster: me, league: c.league, players: c.players, values: c.values });
+    assert.ok(cmp.columns.length >= 1 && cmp.columns.length <= 2, 'compares against 1–2 of your players');
+    assert.ok(!cmp.columns.includes(target.id));
+    for (const id of cmp.columns) assert.ok(c.values[id] && cmp.roles[id].length);
+    if (cmp.gainWeek > 0.5) {
+      assert.ok(cmp.slotWeek, 'a lineup gain means he takes a starting slot');
+      assert.ok(cmp.displacedWeek, 'and someone is bumped');
+      assert.ok(cmp.columns.includes(cmp.displacedWeek) || cmp.columns.includes(cmp.displacedRos));
+    }
+    // Gains agree with the waiver list (same lineup math).
+    assert.ok(Math.abs(cmp.gainWeek - target.gainWeek) < 0.11 && Math.abs(cmp.gainRos - target.gainRos) < 0.11);
+    for (const r of [...cmp.reasons, ...cmp.caveats]) assert.equal(typeof r, 'string');
+  }
+  const best = fas.find(x => x.gainWeek > 1);
+  if (best) {
+    const cmp = E.waiverComparison({ target: best, myRoster: me, league: c.league, players: c.players, values: c.values });
+    assert.ok(cmp.reasons.length >= 1, 'a clear upgrade comes with at least one reason');
+    assert.ok(cmp.reasons[0].includes('pts this week'));
+  }
+});
+
+test('waiver reasons never claim a rest-of-season edge the lineup math does not support', () => {
+  const c = demoContext();
+  const me = c.rosters[0];
+  const fas = E.freeAgentTargets(me, c.rosters, c.league, c.players, c.values, { limit: 80 });
+  for (const target of fas) {
+    const cmp = E.waiverComparison({ target, myRoster: me, league: c.league, players: c.players, values: c.values });
+    const rosReason = cmp.reasons.find(r => r.startsWith('Over the rest of the season'));
+    if (cmp.gainRos <= 0.5) assert.ok(!rosReason, `${c.players[target.id].name}: ROS gain ${cmp.gainRos} but reason "${rosReason}"`);
+    else if (cmp.displacedRos) assert.ok(rosReason && rosReason.includes(c.players[cmp.displacedRos].name));
+  }
+});

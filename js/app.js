@@ -157,7 +157,7 @@ const ago = (iso) => {
 const gameLabel = (v) => v?.gameState === 'post' ? 'Final' : v?.gameState === 'in' ? 'In progress' : fmtKickoff(v?.kickoff);
 const recentNews = (id) => (S.ctx.news?.[id] ?? []).filter(n => !n.published || Date.now() - Date.parse(n.published) < 2 * 864e5);
 
-function playerRow(id, { trail = '', sub = '', notes = true, slot = null, interactive = false, extra = '', why = false, compact = false } = {}) {
+function playerRow(id, { trail = '', sub = '', notes = true, slot = null, interactive = false, extra = '', why = false, compact = false, attrs = '', end = '' } = {}) {
   const p = P(id); const v = V(id);
   if (!p) return `<li><span class="pbadge slot">${esc(slot ?? '—')}</span><div class="grow"><div class="name secondary">Empty</div></div></li>`;
   const meta = [slot && slot !== p.pos ? slot.replace('_', ' ') : null, p.team ?? 'FA', ...(compact ? [] : [v?.opponent ? `vs ${v.opponent}` : null, gameLabel(v)]), sub].filter(Boolean).join(' · ');
@@ -165,14 +165,14 @@ function playerRow(id, { trail = '', sub = '', notes = true, slot = null, intera
   const chips = [...(notes ? (v?.notes ?? []).filter(n => !compact || n.kind === 'injury' || n.kind === 'bye').map(noteChip) : [])];
   if (isLockedId(id)) chips.unshift(`<span class="chip">${icon('lock', 12)}Locked · game ${v?.gameState === 'post' ? 'final' : 'started'}</span>`);
   if (notes && !compact && recentNews(id).length) chips.push(`<span class="chip blue">${icon('news', 12)}News</span>`);
-  return `<li class="${interactive ? 'interactive' : ''}">
+  return `<li class="${interactive ? 'interactive' : ''}" ${attrs}>
     <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
     <div class="grow">
       <div class="name">${esc(p.name)}</div>
       <div class="meta">${esc(meta)}</div>
       ${chips.length ? `<div class="chips">${chips.join('')}</div>` : ''}${extra}
     </div>
-    <div class="trail">${trail}</div>
+    <div class="trail">${trail}</div>${end}
     ${why && v ? `<button class="why-toggle" data-why="${esc(id)}" aria-haspopup="dialog" aria-label="Why ${esc(p.name)} is projected ${f1(v.week)} points">${icon('info', 24)}</button>` : ''}
   </li>`;
 }
@@ -526,7 +526,7 @@ function viewWaivers() {
     </div>
     ${segmented('waiverpos', 'Filter by position', positions.map(p => [p, p === 'ALL' ? 'All' : p]), S.waiverPos, 'data-waiverpos')}
     <section class="card flush">
-      <header><h2 class="title3">Waiver targets</h2>${f ? '<span class="caption secondary">Suggested blind bid</span>' : ''}</header>
+      <header><h2 class="title3">Waiver targets</h2><span class="caption secondary">Tap a player to compare${f ? ' · suggested blind bid' : ''}</span></header>
       ${list.length ? `<ul class="list">${list.map(x => {
         const bid = f ? E.fabBid(x, f) : null;
         const trail = bid
@@ -534,7 +534,9 @@ function viewWaivers() {
           : `<div class="big num ${cls(x.gainRos)}">${signed(x.gainRos)}</div><div class="caption secondary">${x.gainRos >= 15 ? 'Worth your priority' : 'Add after waivers clear'}</div>`;
         const sub = `${signed(x.gainRos)} ROS · ${signed(x.gainWeek)} this wk${x.drop ? ` · drop ${P(x.drop).name}` : ''}`;
         const kind = `<span class="chip ${x.kind === 'hold' ? 'green' : 'blue'}">${x.kind === 'hold' ? 'Season-long add' : 'Streamer'}</span>${x.demand ? `<span class="chip orange">${x.demand} other team${x.demand > 1 ? 's' : ''} need him</span>` : ''}`;
-        return playerRow(x.id, { sub, trail, extra: `<div class="chips">${kind}</div>` });
+        return playerRow(x.id, { sub, trail, extra: `<div class="chips">${kind}</div>`, interactive: true,
+          attrs: `data-waiver="${esc(x.id)}" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Compare ${esc(P(x.id).name)} with your roster"`,
+          end: `<span class="secondary" aria-hidden="true">${icon('chevron', 16)}</span>` });
       }).join('')}</ul>` : `<div class="empty">${icon('check', 40)}<div>No free agent beats your current lineup at this position.</div></div>`}
     </section>
     ${f ? `<p class="footnote secondary" style="margin:0 8px">Bids scale with how much of a typical starter’s rest-of-season output the player adds, how many weeks remain, and how many other rosters would also start him. Bid the low end when nobody else needs him; go to the high end for a must-have or late in the season when unspent FAB is worthless.</p>` : ''}
@@ -685,6 +687,66 @@ function menuSheet() {
 function openSheet(id) {
   if (V(id)) showSheet(playerSheet(id), `[data-why="${CSS.escape(id)}"]`);
 }
+
+/** Waiver target vs. the players on your roster he would replace. */
+function cmpRows(ids) {
+  const vs = ids.map(V), ps = ids.map(P);
+  const facts = vs.map(v => v.breakdown.facts);
+  const best = (vals, dir) => {
+    const idx = vals.map((v, i) => [v, i]).filter(([v]) => v != null);
+    if (idx.length < 2) return null;
+    const m = dir === 'min' ? Math.min(...idx.map(x => x[0])) : Math.max(...idx.map(x => x[0]));
+    return idx.filter(x => x[0] === m).length === idx.length ? null : idx.find(x => x[0] === m)[1];
+  };
+  const num = (label, vals, fmt, dir = 'max') => ({ label, cells: vals.map(v => (v == null ? '—' : fmt(v))), best: best(vals, dir) });
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  const mm = vs.map(v => v.breakdown.steps.find(x => x.key === 'matchup')?.mult ?? null);
+  const status = ids.map((id, i) => P(id).injury ? `${P(id).injury}` : vs[i].notes.some(n => n.kind === 'bye') ? 'Bye week' : 'Healthy');
+  return [
+    num('This week', vs.map(v => v.week), f1),
+    num('Rest of season', vs.map(v => v.ros), f1),
+    num('Points per game', vs.map(v => v.rate), f1),
+    { label: 'Matchup', cells: vs.map((v, i) => (v.opponent ? `vs ${v.opponent}${mm[i] != null ? ` (${mm[i] >= 1 ? '+' : '−'}${Math.round(Math.abs(mm[i] - 1) * 100)}%)` : ''}` : '—')), best: best(mm, 'max') },
+    num('Team implied total', facts.map(x => x.env?.implied ?? null), f1),
+    num('Snaps (last 3)', facts.map(x => x.usage?.snap?.l3 ?? null), pct),
+    num('Target share (last 3)', facts.map(x => x.usage?.tgt?.l3 ?? null), pct),
+    { label: 'Status', cells: status, best: status.every(s => s === 'Healthy') ? null : status.findIndex(s => s === 'Healthy') >= 0 && status.filter(s => s === 'Healthy').length === 1 ? status.indexOf('Healthy') : null },
+    num('Expert rank', facts.map(x => x.expert?.posRank ?? null), (n) => String(n), 'min'),
+    { label: 'Kickoff', cells: vs.map(v => gameLabel(v) ?? '—'), best: null },
+  ].map(r => ({ ...r, show: r.cells.some(c => c !== '—') })).filter(r => r.show);
+}
+
+function waiverSheet(id) {
+  const x = fas().find(t => t.id === id);
+  const cmp = E.waiverComparison({ target: x, myRoster: S.me, league: S.ctx.league, players: S.ctx.players, values: S.ctx.values });
+  const p = P(id), v = V(id), f = fab();
+  const bid = f ? E.fabBid(x, f) : null;
+  const ids = [id, ...cmp.columns];
+  const name = (i) => esc(P(i).name);
+  const slotTxt = cmp.slotWeek || cmp.slotRos
+    ? `He would start at <b>${esc((cmp.slotWeek ?? cmp.slotRos).replace('_', ' '))}</b>${cmp.displacedWeek || cmp.displacedRos ? `, bumping <b>${name(cmp.displacedWeek ?? cmp.displacedRos)}</b> to your bench` : ''}.`
+    : 'He wouldn’t crack your starting lineup right now.';
+  const summary = `<div class="callout">${icon('sparkles', 22)}<div><div class="headline">${signed(cmp.gainWeek)} pts this week · ${signed(cmp.gainRos)} rest of season</div>
+    <div class="subhead secondary">${slotTxt}${x.drop ? ` To make room, drop <b>${name(x.drop)}</b>.` : ''}</div></div></div>`;
+  const why = cmp.reasons.length
+    ? `<h3 class="headline" style="margin:var(--s3) 0 var(--s1)">Why pick him up</h3><ul class="reasons">${cmp.reasons.map(r => `<li>${icon('check', 18)}<span>${esc(r)}</span></li>`).join('')}</ul>`
+    : `<p class="subhead secondary" style="margin:var(--s2) 0 0">No standout edge beyond the lineup math above.</p>`;
+  const caveats = cmp.caveats.length ? `<ul class="reasons caveats" style="margin-top:var(--s1)">${cmp.caveats.map(r => `<li>${icon('info', 18)}<span>${esc(r)}</span></li>`).join('')}</ul>` : '';
+  const rows = cmpRows(ids);
+  const role = (i, k) => (k === 0 ? 'Waiver target' : (cmp.roles[i] ?? []).slice(0, 1).join(''));
+  const table = `<div class="scroll-x" style="margin-top:var(--s3)"><table class="tbl cmp"><thead><tr><th></th>${ids.map((i, k) => `<th class="${k === 0 ? 'tgt' : ''}">
+      <span class="pbadge sm ${esc(P(i).pos)}">${esc(P(i).pos)}</span><div class="cmp-name">${name(i)}</div><div class="caption secondary">${esc(role(i, k))}</div></th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr><td class="lab">${esc(r.label)}</td>${r.cells.map((c, k) => `<td class="num ${k === 0 ? 'tgt' : ''} ${r.best === k ? 'best' : ''}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  const fabBox = bid ? `<div class="callout" style="margin-top:var(--s3)">${icon('dollar', 22)}<div><div class="headline">Suggested bid: $${bid.rec} <span class="secondary" style="font-weight:500">($${bid.low}–$${bid.high})</span></div>
+      <div class="subhead secondary">${bid.pctOfRemaining}% of your remaining $${f.budget - f.spent}. ${x.demand ? `${x.demand} other team${x.demand > 1 ? 's' : ''} would also start him, so bid toward the high end if you want him.` : 'No other roster looks like it needs him badly, so the low end should win.'}</div></div></div>` : '';
+  return sheetShell({
+    badge: `<span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>`,
+    title: p.name, sub: ['Waiver target', p.team ?? 'FA', v.opponent ? `vs ${v.opponent}` : null, gameLabel(v)].filter(Boolean).join(' · '),
+    trail: bid ? `<div class="trail"><div class="title2 num">$${bid.rec}</div><div class="caption secondary">suggested bid</div></div>` : `<div class="trail"><div class="title2 num ${cls(cmp.gainRos)}">${signed(cmp.gainRos)}</div><div class="caption secondary">ROS pts</div></div>`,
+    body: summary + why + caveats + table + fabBox,
+  });
+}
+function openWaiver(id) { if (V(id) && fas().some(t => t.id === id)) showSheet(waiverSheet(id), `[data-waiver="${CSS.escape(id)}"]`); }
 function openMenu() { showSheet(menuSheet(), '[data-action="menu"]'); }
 
 function showSheet(html, focusSel) {
@@ -799,10 +861,11 @@ $app.addEventListener('keydown', (e) => {
 });
 
 $app.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-tab],[data-action],[data-waiverpos],[data-trademode],[data-why],[data-xw]');
+  const el = e.target.closest('[data-tab],[data-action],[data-waiverpos],[data-trademode],[data-why],[data-xw],[data-waiver]');
   if (!el) return;
   if (el.dataset.tab) { location.hash = el.dataset.tab; return; }
   if (el.dataset.why) return openSheet(el.dataset.why);
+  if (el.dataset.waiver) return openWaiver(el.dataset.waiver);
   if (el.dataset.xw) { S.expertWeight = +el.dataset.xw; store.set('xw', S.expertWeight); applyExpert(); return render(); }
   if (el.dataset.waiverpos) return setState({ waiverPos: el.dataset.waiverpos });
   if (el.dataset.trademode) return setState({ tradeMode: el.dataset.trademode });

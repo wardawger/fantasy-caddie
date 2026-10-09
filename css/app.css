@@ -359,3 +359,24 @@ body.sheet-open { overflow: hidden; }
 .dd-opt.sel { color: var(--blue); font-weight: 600; }
 @keyframes dd-in { from { opacity: 0; transform: scale(.97) translateY(-4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .dd-pop { animation: none; } .dd-btn svg { transition: none; } }
+
+/* Waiver comparison sheet */
+.pbadge.sm { width: 32px; height: 32px; border-radius: 9px; font-size: 11px; margin: 0 auto 6px; }
+.cmp { min-width: 100%; }
+.cmp th { text-transform: none; letter-spacing: 0; text-align: center; vertical-align: bottom; padding: 8px 8px 10px; min-width: 112px; font-weight: 600; color: var(--label); }
+.cmp th:first-child, .cmp td.lab { position: sticky; left: 0; z-index: 1; min-width: 104px; text-align: left; background: transparent; color: var(--label-2); font-size: 13px; font-weight: 600; }
+.cmp-name { font-size: 14px; line-height: 18px; }
+.cmp td { text-align: center; font-size: 15px; }
+.cmp td.tgt, .cmp th.tgt { background: color-mix(in srgb, var(--blue) 10%, transparent); }
+.cmp th.tgt { border-radius: 14px 14px 0 0; }
+.cmp td.best { color: var(--green); font-weight: 700; }
+.reasons { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 15px; line-height: 20px; }
+.reasons li { display: flex; gap: 10px; align-items: flex-start; }
+.reasons li svg { flex: none; margin-top: 1px; color: var(--green); }
+.reasons.caveats li svg { color: var(--orange); }
+@media (max-width: 900px) {
+  .cmp th { min-width: 92px; padding: 8px 4px 10px; }
+  .cmp th:first-child, .cmp td.lab { min-width: 76px; padding-left: 4px; font-size: 12px; }
+  .cmp-name { font-size: 13px; line-height: 17px; }
+  .cmp td { font-size: 14px; padding: 8px 4px; }
+}

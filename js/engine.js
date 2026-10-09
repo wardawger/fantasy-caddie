@@ -468,6 +468,85 @@ export function fabBid(target, { budget, spent, week, numTeams, starterRos }) {
   };
 }
 
+/**
+ * Side-by-side case for a waiver target: where he would slot into your lineup, who he would bump,
+ * who to compare him with, and plain-English reasons (matchup, game script, role, health).
+ */
+export function waiverComparison({ target, myRoster, league, players, values }) {
+  const rp = league.roster_positions, ids = rosterIds(myRoster), tid = target.id;
+  const run = (key) => {
+    const before = optimalLineup(ids, rp, players, values, key);
+    const after = optimalLineup([...ids, tid], rp, players, values, key);
+    return {
+      slot: after.slots.find(s => s.id === tid)?.slot ?? null,
+      displaced: [...before.starters].find(id => !after.starters.has(id)) ?? null,
+      gain: round1(after.total - before.total),
+    };
+  };
+  const wk = run('week'), ros = run('ros');
+  const samePos = ids.filter(id => players[id]?.pos === players[tid].pos && values[id]).sort((a, b) => values[b].ros - values[a].ros);
+
+  const columns = [], roles = {};
+  const add = (id, role) => {
+    if (!id || id === tid || !values[id]) return;
+    if (!columns.includes(id)) columns.push(id);
+    (roles[id] ??= []).push(role);
+  };
+  add(ros.displaced, 'Bumped from your lineup'); add(wk.displaced, 'Bumped this week'); add(target.drop, 'Drop candidate');
+  if (columns.length < 2) add(samePos[0], 'Your best at the position');
+  if (!columns.length) add(samePos.at(-1), 'Your weakest at the position');
+  columns.length = Math.min(columns.length, 2);
+
+  const t = values[tid];
+  const stepMult = (v, key) => v.breakdown.steps.find(x => x.key === key)?.mult ?? null;
+  const reasons = [], caveats = [];
+  // This-week reasons compare with who he'd bump this week; rest-of-season only with someone who is
+  // actually a rest-of-season starter he'd displace (otherwise a "better ROS" line contradicts the gain).
+  const refId = values[wk.displaced] ? wk.displaced : columns[0] ?? null;
+  const ref = refId ? values[refId] : null;
+  const refName = refId ? players[refId].name : null;
+  if (ref) {
+    const dW = round1(t.week - ref.week);
+    if (Math.abs(dW) >= 0.5) reasons.push(`Projects ${f(t.week)} pts this week vs ${f(ref.week)} for ${refName} (${sgn(dW)}).`);
+    const mt = stepMult(t, 'matchup'), mr = stepMult(ref, 'matchup');
+    if (mt != null && mr != null && Math.abs(mt - mr) >= 0.04) reasons.push(mt > mr
+      ? `Better matchup${t.opponent ? ` against ${t.opponent}` : ''} (${pct(mt - 1)} vs ${pct(mr - 1)} for ${refName}).`
+      : `Tougher matchup than ${refName} this week (${pct(mt - 1)} vs ${pct(mr - 1)}).`);
+    const et = t.breakdown.facts.env?.implied, er = ref.breakdown.facts.env?.implied;
+    if (et != null && er != null && Math.abs(et - er) >= 2) reasons.push(et > er
+      ? `His team is projected to score ${f(et)} vs ${f(er)} for ${refName}’s, so more scoring chances.`
+      : `His team is projected for fewer points (${f(et)} vs ${f(er)}).`);
+    const ut = t.breakdown.facts.usage, ur = ref.breakdown.facts.usage;
+    const sT = ut?.snap?.l3, sR = ur?.snap?.l3;
+    if (sT != null && sR != null && Math.abs(sT - sR) >= 0.08) reasons.push(sT > sR
+      ? `Plays more: ${Math.round(sT * 100)}% of snaps over the last 3 games vs ${Math.round(sR * 100)}%.`
+      : `Plays less: ${Math.round(sT * 100)}% of snaps vs ${Math.round(sR * 100)}%.`);
+    const gT = ut && ut.snap.season ? ut.snap.l3 / ut.snap.season - 1 : null;
+    if (gT != null && gT >= 0.12) reasons.push(`His role is growing (snaps up ${Math.round(gT * 100)}% vs his season average).`);
+    const injR = players[refId].injury, injT = players[tid].injury;
+    if (injR && !injT) reasons.push(`${refName} is ${injR}${players[refId].injuryNote ? ` (${players[refId].injuryNote})` : ''}; ${players[tid].name} is healthy.`);
+    if (ref.week === 0 && t.week > 0 && !injR) reasons.push(`${refName} is not expected to play this week.`);
+  }
+  const refR = ros.gain > 0.5 && ros.displaced && values[ros.displaced] ? ros.displaced : null;
+  if (refR) {
+    const r = values[refR];
+    reasons.push(`Over the rest of the season he projects ${f(t.ros)} pts vs ${f(r.ros)} for ${players[refR].name} (${sgn(round1(t.ros - r.ros))}), ${f(t.rate)} vs ${f(r.rate)} per game.`);
+  }
+  const ex = t.breakdown.facts.expert;
+  if (ex) reasons.push(`Experts rank him ${players[tid].pos}${ex.posRank}${ex.ranks?.length > 1 ? ` (average of ${ex.ranks.length} sources)` : ''}.`);
+
+  if (players[tid].injury) caveats.push(`He is listed ${players[tid].injury}${players[tid].injuryNote ? ` (${players[tid].injuryNote})` : ''}.`);
+  if (t.week === 0) caveats.push('He is not projected to play this week (bye or injury).');
+  if (ros.gain <= 0.5 && wk.gain > 0.5) caveats.push('This is a one-week streaming move; he doesn’t improve your rest-of-season outlook.');
+  if (!wk.slot && !ros.slot) caveats.push('He would not crack your starting lineup; this is a depth or upside add.');
+
+  return { slotWeek: wk.slot, slotRos: ros.slot, displacedWeek: wk.displaced, displacedRos: ros.displaced,
+    gainWeek: wk.gain, gainRos: ros.gain, columns, roles, reasons, caveats };
+}
+const f = (n) => (Math.round((n ?? 0) * 10) / 10).toFixed(1);
+const sgn = (n) => `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n).toFixed(1)}`;
+const pct = (x) => `${x >= 0 ? '+' : '−'}${Math.round(Math.abs(x) * 100)}%`;
+
 // ---------- Trades ----------
 
 function afterTrade(ids, give, get, rosterSize, values) {
