@@ -181,3 +181,43 @@ test('defense-vs-position uses points allowed per game, shrinks early and is cap
   assert.ok(early.Z.TE < late.Z.TE, 'more games → more trust');
   assert.ok(late.Z.TE <= 1.15 && late.Y.TE >= 0.85);
 });
+
+// ---- kickers & defenses
+test('team-defense season projections (gp=1 with season totals) do not inflate per-game value', () => {
+  const players = { d: { id: 'd', pos: 'DEF', team: 'ARI', name: 'ARI D' }, w: { id: 'w', pos: 'WR', team: 'ARI', name: 'WR' } };
+  const scoring = { sack: 1, int: 2, fum_rec: 2, rec: 1 };
+  const ctx = { players, scoring, week: 5, slate: null,
+    // Sleeper shape: season totals but gp = 1 for the defense.
+    seasonProj: { d: { stats: { gp: 1, sack: 34, int: 8, fum_rec: 7 } }, w: { stats: { gp: 18, rec: 85 } } },
+    weekProj: { d: { stats: { sack: 2.06, int: 0.49, fum_rec: 0.42 } }, w: { stats: { rec: 5 } } } };
+  const v = E.buildValues(ctx);
+  const perGame = v.d.rate;
+  assert.ok(perGame < 10, `defense rate ${perGame} should be about a weekly projection (~6), not ~60`);
+  assert.ok(v.d.ros < 120, `defense ROS ${v.d.ros}`);
+  assert.ok(Math.abs(v.w.rate - 85 / 17) < 0.2, 'skill players divide by 17 games, not Sleeper\'s 18');
+  assert.equal(v.d.pos, 'DEF');
+});
+
+test('K/DEF are discounted in trade value and never used as suggested-trade chips', () => {
+  const rb = { pos: 'RB', vor: 80, ros: 200 }, def = { pos: 'DEF', vor: 80, ros: 200 }, k = { pos: 'K', vor: 80, ros: 200 };
+  assert.ok(E.tradeValue(def) < E.tradeValue(rb) * 0.35);
+  assert.ok(E.tradeValue(k) < E.tradeValue(def));
+  const c = demoContext();
+  const me = c.rosters[0];
+  const s = E.suggestTrades({ myRoster: me, rosters: c.rosters, league: c.league, players: c.players, values: c.values, week: c.week });
+  for (const t of s) for (const id of [...t.give, ...t.get]) assert.ok(!['K', 'DEF'].includes(c.players[id].pos), `${c.players[id].name}`);
+});
+
+test('waiver list ranks skill upgrades above streamers, caps K/DEF rows, and keeps their FAB bids tiny', () => {
+  const c = demoContext();
+  const me = c.rosters[0];
+  const fas = E.freeAgentTargets(me, c.rosters, c.league, c.players, c.values, { limit: 100 });
+  assert.ok(fas.filter(x => x.pos === 'DEF').length <= 3 && fas.filter(x => x.pos === 'K').length <= 2);
+  for (const f of fas.filter(x => x.pos === 'K' || x.pos === 'DEF')) {
+    assert.equal(f.kind, 'stream');
+    const b = E.fabBid({ ...f, gainRos: 80, gainWeek: 10, demand: 8 }, { budget: 100, spent: 0, week: 3, numTeams: 12, starterRos: 100 });
+    assert.ok(b.rec <= 2, `bid $${b.rec}`);
+  }
+  const skill = E.fabBid({ pos: 'RB', kind: 'hold', gainRos: 80, gainWeek: 10, demand: 8 }, { budget: 100, spent: 0, week: 3, numTeams: 12, starterRos: 100 });
+  assert.ok(skill.rec > 5);
+});

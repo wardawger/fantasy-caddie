@@ -126,12 +126,14 @@ export function buildValues(ctx) {
     const wp = ctx.weekProj?.[p.id];
     const sp = ctx.seasonProj?.[p.id];
     const st = ctx.seasonStats?.[p.id];
-    // Sleeper's season projections report gp=18 (weeks, not games); a team plays 17.
-    const projGames = Math.min(sp?.stats?.gp || 17, 17);
-    const projRate = sp ? fantasyPoints(sp.stats, scoring) / projGames : 0;
-    const actualRate = st?.games ? st.pts / st.games : null;
     const wkPts = wp ? fantasyPoints(wp.stats, scoring) : null;
-
+    // Sleeper's season projections report gp=18 (weeks, not games); a team plays 17.
+    // Team defenses are different: they report gp=1 next to season-long totals (and omit the
+    // points/yards-allowed buckets), so dividing by gp inflated their per-game rate ~17x.
+    // For defenses the weekly projection (which has the buckets) is the per-game rate.
+    const projGames = p.pos === 'DEF' ? 17 : Math.min(sp?.stats?.gp || 17, 17);
+    const projRate = p.pos === 'DEF' && wkPts != null ? wkPts : sp ? fantasyPoints(sp.stats, scoring) / projGames : 0;
+    const actualRate = st?.games ? st.pts / st.games : null;
     // Blend preseason/ROS projection with realised production as games accrue.
     let rate = projRate;
     if (actualRate != null) {
@@ -214,6 +216,7 @@ export function buildValues(ctx) {
 
     out[p.id] = {
       id: p.id,
+      pos: p.pos,
       week: round1(cur),
       rawWeek: wkPts == null ? null : round1(wkPts),
       rate: round1(rate),
@@ -284,7 +287,9 @@ export function addVOR(values, players, league) {
 }
 
 // Perceived trade value: surplus over replacement, plus a sliver of raw output.
-export const tradeValue = (v) => (v ? (v.vor ?? 0) + v.ros * 0.1 : 0);
+// Kickers and defenses are streamed off waivers, so managers pay little for them.
+export const TRADE_POS_WEIGHT = { K: 0.2, DEF: 0.3 };
+export const tradeValue = (v) => (v ? ((v.vor ?? 0) + v.ros * 0.1) * (TRADE_POS_WEIGHT[v.pos] ?? 1) : 0);
 
 const round1 = (n) => Math.round(n * 10) / 10;
 
@@ -415,12 +420,26 @@ export function freeAgentTargets(myRoster, rosters, league, players, values, { l
       const b = optimalLineup(ids, league.roster_positions, players, values, 'ros').total;
       return optimalLineup([...ids, fa.id], league.roster_positions, players, values, 'ros').total - b > 1;
     }).length;
-    out.push({ id: fa.id, gainRos: round1(gainRos), gainWeek: round1(gainWeek), drop, demand,
-      kind: gainRos >= 5 ? 'hold' : 'stream' });
+    const pos = players[fa.id].pos;
+    out.push({ id: fa.id, pos, gainRos: round1(gainRos), gainWeek: round1(gainWeek), drop, demand,
+      kind: gainRos >= 5 && !STREAMER_POS.has(pos) ? 'hold' : 'stream' });
   }
-  out.sort((a, b) => (b.gainRos + b.gainWeek * 2) - (a.gainRos + a.gainWeek * 2));
-  return out.slice(0, limit);
+  const rank = (x) => (x.gainRos + x.gainWeek * 2) * (STREAMER_POS.has(x.pos) ? 0.4 : 1);
+  out.sort((a, b) => rank(b) - rank(a));
+  // A streaming list needs the best few defenses and kickers, not every one that beats yours.
+  const seen = {};
+  const trimmed = out.filter(x => {
+    const cap = STREAMER_CAP[x.pos];
+    if (cap == null) return true;
+    seen[x.pos] = (seen[x.pos] ?? 0) + 1;
+    return seen[x.pos] <= cap;
+  });
+  return trimmed.slice(0, limit);
 }
+
+// Positions that are streamed week to week rather than held.
+const STREAMER_POS = new Set(['K', 'DEF']);
+const STREAMER_CAP = { DEF: 3, K: 2 };
 
 export const usesFab = (league) => league?.settings?.waiver_type === 2;
 
@@ -437,6 +456,7 @@ export function fabBid(target, { budget, spent, week, numTeams, starterRos }) {
   const competition = 1 + 2 * Math.min(target.demand, numTeams) / Math.max(numTeams - 1, 1);
   let pct = impact * 0.6 * competition * (0.4 + 0.6 * seasonLeft);
   if (target.kind === 'stream') pct = Math.min(pct, 0.03 + target.gainWeek / 400);
+  if (STREAMER_POS.has(target.pos)) pct = Math.min(pct, 0.02); // never spend real FAB on a kicker or defense
   pct = Math.min(pct, 0.6);
   const rec = Math.max(target.gainRos > 0 || target.gainWeek > 0 ? 1 : 0, Math.round(remaining * pct));
   return {
@@ -497,7 +517,7 @@ export function gradeFor(perWeek, accept = 0.5) {
 }
 
 export function suggestTrades({ myRoster, rosters, league, players, values, week, limit = 12 }) {
-  const top = (r, n) => rosterIds(r).filter(id => values[id]).sort((a, b) => values[b].ros - values[a].ros).slice(0, n);
+  const top = (r, n) => rosterIds(r).filter(id => values[id] && !['K', 'DEF'].includes(players[id]?.pos)).sort((a, b) => values[b].ros - values[a].ros).slice(0, n);
   const mine = top(myRoster, 14);
   const results = [];
   for (const them of rosters) {
