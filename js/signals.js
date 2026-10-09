@@ -285,6 +285,27 @@ export function matchRankings(rows, players) {
   return { map, unmatched };
 }
 
+/**
+ * Combine several ranking sets. Each set: { id, name, weight, rows }. A player's
+ * rank is the weighted mean of his positional rank across the sources that rank
+ * him (ranks can be fractional); `ranks` keeps each source's own number for display.
+ */
+export function aggregateRankings(sets, players) {
+  const per = {}, perSource = [];
+  for (const set of sets) {
+    const { map, unmatched } = matchRankings(set.rows, players);
+    perSource.push({ id: set.id, name: set.name, matched: Object.keys(map).length, unmatched });
+    for (const [id, r] of Object.entries(map)) (per[id] ??= []).push({ id: set.id, name: set.name, posRank: r.posRank, w: set.weight ?? 1 });
+  }
+  const map = {};
+  for (const [id, list] of Object.entries(per)) {
+    const tw = list.reduce((t, x) => t + x.w, 0);
+    const mean = list.reduce((t, x) => t + x.posRank * x.w, 0) / tw;
+    map[id] = { posRank: Math.round(mean * 10) / 10, n: list.length, ranks: list.map(({ id, name, posRank }) => ({ id, name, posRank })) };
+  }
+  return { map, perSource };
+}
+
 export const fmtKickoff = (iso) => {
   if (!iso) return null;
   const d = new Date(iso);

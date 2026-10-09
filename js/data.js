@@ -2,7 +2,7 @@
 import { sleeper, indexByPlayer } from './sleeper.js';
 import { gameWeather } from './weather.js';
 import { fetchSlate, fetchNews } from './espn.js';
-import { buildSlate, slateAverage, buildUsage, newsByPlayer, matchRankings } from './signals.js';
+import { buildSlate, slateAverage, buildUsage, newsByPlayer, aggregateRankings } from './signals.js';
 import { addVOR, buildDvP, buildValues, fantasyPoints, LAST_WEEK } from './engine.js';
 
 export async function loadLeagueContext(leagueId, onStep = () => {}) {
@@ -54,10 +54,11 @@ export async function loadLeagueContext(leagueId, onStep = () => {}) {
 export function finish(ctx) {
   ctx.slateAvg = slateAverage(ctx.slate);
   ctx.news ??= ctx.newsItems ? newsByPlayer(ctx.newsItems, ctx.players) : null;
-  // Imported expert rankings only apply to the week they were exported for.
-  const er = ctx.expertRows && ctx.expertWeek === ctx.week ? matchRankings(ctx.expertRows, ctx.players) : null;
-  ctx.expert = er?.map ?? null;
-  ctx.expertStats = er ? { matched: Object.keys(er.map).length, unmatched: er.unmatched } : null;
+  // Expert sets (fetched sources + imported CSV) only count for the week they were pulled for.
+  const sets = (ctx.expertSets ?? []).filter(x => x.week === ctx.week && x.rows?.length && x.enabled !== false);
+  const agg = sets.length ? aggregateRankings(sets, ctx.players) : null;
+  ctx.expert = agg?.map ?? null;
+  ctx.expertStats = agg ? { matched: Object.keys(agg.map).length, perSource: agg.perSource } : null;
   ctx.values = buildValues(ctx);
   ctx.sources = {
     projections: Object.keys(ctx.weekProj ?? {}).length > 0,

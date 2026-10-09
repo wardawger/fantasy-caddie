@@ -191,9 +191,10 @@ export function buildValues(ctx) {
     const d = dist[p.pos];
     let expertPts = null;
     if (ex && d?.length) {
-      expertPts = d[Math.min(ex.posRank, d.length) - 1];
+      const r = Math.max(1, Math.min(ex.posRank, d.length)), lo = Math.floor(r), hi = Math.ceil(r);
+      expertPts = d[lo - 1] + (d[hi - 1] - d[lo - 1]) * (r - lo);
       if (xw > 0 && cur > 0) {
-        step('expert', `Expert consensus (${p.pos}${ex.posRank})`, (cur * (1 - xw) + expertPts * xw) / cur,
+        step('expert', `Expert consensus (${p.pos}${ex.posRank}${ex.n > 1 ? `, ${ex.n} sources` : ''})`, (cur * (1 - xw) + expertPts * xw) / cur,
           `A ${p.pos}${ex.posRank} is worth about ${round1(expertPts)} pts in this league; blended at ${Math.round(xw * 100)}%`);
       }
     }

@@ -23,7 +23,7 @@ Each player's projection for the week starts from Sleeper's weekly projection (s
 | Recent usage | Snap share, target share (and rush share for RBs) over the last 3 games vs. the season, from Sleeper weekly stats. Needs 4+ games | ±10% max |
 | Game script | ESPN betting line: team implied total (O/U ± spread), weighted 60% because Sleeper's projection already prices in part of it | ±12% max |
 | Weather | Open-Meteo forecast for outdoor stadiums | wind, heavy rain/snow and cold hurt passing and kickers |
-| Expert consensus | Optional CSV import. A positional rank is translated into the points that rank is worth in your league, then blended in (Off / 15 / 25 / 40%) | never lifts Out or bye players |
+| Expert consensus | Rankings from FantasyPros, CBS Sports, Draft Sharks and Fantasy Football Calculator (ADP), fetched by a Netlify Function and chosen to match your league (scoring, superflex, teams); optional CSV import too. Each source's positional rank is averaged (weighted), translated into the points that rank is worth in your league, and blended in (Off / 15 / 25 / 40%) | never lifts Out or bye players |
 
 **Kickoff checks.** Kickoff time and game state come from ESPN. A player whose game has started (or finished) is locked in Sleeper, so the optimizer keeps locked starters where they are and won't recommend starting a locked bench player.
 
@@ -43,7 +43,9 @@ All multiplier sizes are my own estimates, not fitted to historical data.
 - Sleeper public API (`api.sleeper.app/v1`): read-only, no auth. Projections, stats and schedule come from the endpoints the Sleeper app itself uses (`api.sleeper.com`). Those endpoints are undocumented, so the app degrades gracefully if one is missing.
 - ESPN's public site API (`site.api.espn.com`) for betting lines, kickoff times/state and player news (keyless, undocumented). If it fails, those signals are dropped and shown as unavailable.
 - Open-Meteo for stadium forecasts (keyless).
-- Expert rankings have no free keyless API, so they come from a CSV you import (stored in your browser only).
+- Expert rankings: `netlify/functions/rankings.mjs` fetches them server-side (those sites don't allow browser CORS) and returns each source's rows plus per-URL status. Pages are picked from your league settings: Sleeper `rec` scoring → standard / half-PPR / PPR; `SUPER_FLEX` or two QB slots → superflex pages; team count → FFC ADP size. The sources' terms of use may restrict automated access, and their markup can change, so each source reports Loaded/Failed in the app. Sources can be switched off, and a CSV import is always available.
+  - FantasyPros: reads the `ecrData` JSON embedded in the rankings page. CBS: parses the rankings table. Draft Sharks: looks for embedded app data (mostly premium, so it will often fail). FFC: uses its public ADP JSON API (draft-position value, so weighted 0.5).
+  - Responses are cached for 30 minutes at Netlify's CDN and in your browser.
 
 ## Develop
 

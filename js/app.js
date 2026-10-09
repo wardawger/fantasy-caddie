@@ -4,6 +4,7 @@ import { demoContext } from './demo.js';
 import * as E from './engine.js';
 import { icon } from './icons.js';
 import { fmtKickoff, isLocked, parseRankingsCSV } from './signals.js';
+import { leagueProfile } from './rankingSources.js';
 
 const $app = document.getElementById('app');
 const TABS = [
@@ -24,6 +25,7 @@ const S = {
   ctx: null, me: null, tab: location.hash.slice(1) || 'overview',
   waiverPos: 'ALL', tradeMode: 'suggested', builder: { partner: null, give: new Set(), get: new Set() },
   memo: {}, open: new Set(), expertWeight: store.get('xw') ?? 0.25, rankMsg: null,
+  remote: { status: 'idle' }, srcOff: store.get('srcOff') ?? {},
 };
 
 // ---------- helpers ----------
@@ -78,17 +80,56 @@ function startDemo() {
 
 function startApp(ctx, me) {
   S.memo = {}; S.open = new Set(); S.rankMsg = null;
-  S.ctx = ctx; applyExpert();
+  S.ctx = ctx; S.remote = { status: 'idle' }; applyExpert();
   S.builder = { partner: ctx.rosters.find(r => r.roster_id !== me.roster_id)?.roster_id ?? null, give: new Set(), get: new Set() };
   setState({ ctx, me, screen: 'app' });
+  loadRemoteRankings();
+}
+
+function expertSets() {
+  const sets = [];
+  const rd = S.remote.data;
+  if (rd) for (const src of rd.sources) {
+    if (src.rows?.length) sets.push({ id: src.id, name: src.name, weight: src.weight, rows: src.rows, week: rd.week, enabled: !S.srcOff[src.id] });
+  }
+  const csv = store.get('rankings');
+  if (csv?.rows?.length) sets.push({ id: 'csv', name: 'Imported file', weight: 1, rows: csv.rows, week: csv.week, enabled: !S.srcOff.csv });
+  return sets;
 }
 
 function applyExpert() {
-  const saved = store.get('rankings');
   const c = S.ctx;
-  c.expertRows = saved?.rows ?? null; c.expertWeek = saved?.week ?? null; c.expertWeight = S.expertWeight;
+  c.expertSets = expertSets(); c.expertWeight = S.expertWeight;
   finish(c);
   S.memo = {};
+}
+
+async function loadRemoteRankings(force = false) {
+  const c = S.ctx;
+  // The sample league has fictional players, so live rankings would match nothing (?forceRemote is for testing).
+  if (c.demo && !location.search.includes('forceRemote')) { S.remote = { status: 'demo' }; return; }
+  const key = `${c.league.league_id}:${c.week}`;
+  const cached = store.get('remote');
+  if (!force && cached?.key === key && Date.now() - cached.t < 30 * 60e3) {
+    S.remote = { status: 'ok', data: cached.data, t: cached.t }; applyExpert(); return render();
+  }
+  S.remote = { status: 'loading' }; render();
+  const prof = leagueProfile(c.league);
+  try {
+    const qs = new URLSearchParams({ scoring: prof.scoring, superflex: prof.superflex ? '1' : '0', teams: String(prof.teams), season: String(c.season),
+      k: prof.hasK ? '1' : '0', dst: prof.hasDef ? '1' : '0', tep: prof.tePremium ? '1' : '0' });
+    const res = await fetch(`/.netlify/functions/rankings?${qs}`);
+    if (!res.ok) throw new Error(res.status === 404 ? 'not-deployed' : `The rankings service returned HTTP ${res.status}`);
+    const data = await res.json();
+    data.week = c.week;
+    if (S.ctx !== c) return; // switched leagues while loading
+    store.set('remote', { key, t: Date.now(), data });
+    S.remote = { status: 'ok', data, t: Date.now() };
+  } catch (e) {
+    if (S.ctx !== c) return;
+    S.remote = e.message === 'not-deployed' ? { status: 'unavailable' } : { status: 'error', error: e.message || 'Could not reach the rankings service.' };
+  }
+  applyExpert(); render();
 }
 
 // ---------- computed ----------
@@ -159,8 +200,8 @@ function breakdownPanel(id) {
     : none('<b>Game</b> · schedule/line data unavailable'));
   facts.push(isLockedId(id) ? `<li><b>Lineup lock</b> · this game has started, so he can’t be moved in Sleeper</li>` : env?.kickoff ? `<li><b>Lineup lock</b> · locks at kickoff, ${esc(fmtKickoff(env.kickoff))}</li>` : '');
   facts.push(f.expert
-    ? `<li><b>Expert rank</b> · ${p.pos}${f.expert.posRank} (≈ ${f1(f.expert.pts)} pts in this league) · weighted ${Math.round(S.expertWeight * 100)}%</li>`
-    : none('<b>Expert rank</b> · none imported for this player'));
+    ? `<li><b>Expert rank</b> · ${p.pos}${f.expert.posRank}${f.expert.ranks?.length > 1 ? ` (average of ${f.expert.ranks.map(r => `${esc(r.name)} ${p.pos}${r.posRank}`).join(', ')})` : f.expert.ranks?.length ? ` (${esc(f.expert.ranks[0].name)})` : ''} ≈ ${f1(f.expert.pts)} pts in this league · weighted ${Math.round(S.expertWeight * 100)}%</li>`
+    : none('<b>Expert rank</b> · none for this player'));
   const news = (S.ctx.news?.[id] ?? []);
   facts.push(news.length
     ? `<li><b>News</b> (shown for context; it doesn’t change the number)<ul class="news">${news.map(n => `<li>${n.url ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.headline)}</a>` : esc(n.headline)} <span class="secondary">${esc(ago(n.published))}</span>${n.description ? `<div class="caption secondary">${esc(n.description)}</div>` : ''}</li>`).join('')}</ul></li>`
@@ -311,27 +352,52 @@ function sourcesCard() {
       ${chip(so.usage, 'Snap & target share', so.usage ? `${n(S.ctx.usage)} players` : 'not enough games yet')}
       ${chip(so.weather, 'Weather')}
       ${chip(so.news, 'News', so.news ? `${n(S.ctx.news)} players` : 'unavailable')}
-      ${chip(so.experts > 0, 'Expert rankings', so.experts ? `${so.experts} matched` : 'none imported')}
+      ${chip(so.experts > 0, 'Expert rankings', so.experts ? `${so.experts} players` : 'none loaded')}
     </div>
     <p class="footnote secondary" style="margin:12px 0 0">Open any player’s <b>chevron</b> to see his base projection and each adjustment in order. Grey items weren’t available, so they are left out of the math instead of guessed.</p>
   </section>`;
 }
 
 function expertCard() {
-  const saved = store.get('rankings');
-  const stale = saved && saved.week !== S.ctx.week;
-  const st = S.ctx.expertStats;
+  const csv = store.get('rankings');
+  const prof = leagueProfile(S.ctx.league);
+  const stats = S.ctx.expertStats;
+  const per = (id) => stats?.perSource.find(x => x.id === id);
   const weights = [[0, 'Off'], [0.15, 'Light'], [0.25, 'Medium'], [0.4, 'Heavy']];
-  return `<section class="card"><header><h2 class="title3">Expert rankings</h2>
-      ${saved ? `<span class="chip ${stale ? 'orange' : 'green'}">${stale ? `Week ${saved.week} file · out of date` : `Week ${saved.week} · ${st?.matched ?? 0} matched`}</span>` : '<span class="chip">Optional</span>'}</header>
-    <p class="subhead secondary" style="margin:0 0 var(--s2)">No free service offers expert rankings to a web app, so import a CSV export (for example a FantasyPros weekly rankings file, usually available with a free account). Each positional rank is translated into points for <i>your</i> scoring and blended in last. Import QB/RB/WR/TE, K and DST files one after another and they merge.</p>
-    <div class="row wrap">
+  const R = S.remote;
+  const sw = (id, on) => `<label class="check" style="width:auto"><input type="checkbox" data-src="${id}" ${on ? 'checked' : ''} aria-label="Use ${id}"></label>`;
+  const srcRow = (src) => {
+    const ok = src.rows?.length;
+    const m = per(src.id);
+    const used = src.tried?.find(t => t.ok);
+    const lastErr = src.tried?.filter(t => !t.ok).map(t => t.error).at(-1) ?? src.error;
+    return `<li>${sw(src.id, !S.srcOff[src.id])}<div class="grow">
+        <div class="name"><a href="${esc(src.home)}" target="_blank" rel="noopener" style="color:inherit">${esc(src.name)}</a>${src.weight < 1 ? ` <span class="caption secondary">weight ${src.weight}</span>` : ''}</div>
+        <div class="meta" style="white-space:normal">${ok ? `${src.rows.length} players${m ? ` · ${m.matched} matched on Sleeper` : ''}${used ? ` · ${esc(used.url.replace(/^https?:\/\/(www\.)?/, ''))}` : ''}` : esc(lastErr ?? 'No data')}</div>
+      </div><span class="chip ${ok ? 'green' : 'red'}">${ok ? 'Loaded' : 'Failed'}</span></li>`;
+  };
+  let remote;
+  if (R.status === 'loading') remote = `<li><div class="progress"><div class="spinner"></div><span role="status">Fetching expert rankings for your league…</span></div></li>`;
+  else if (R.status === 'ok') remote = R.data.sources.map(srcRow).join('');
+  else if (R.status === 'demo') remote = `<li class="secondary">Live rankings are skipped in the sample league.</li>`;
+  else if (R.status === 'unavailable') remote = `<li class="secondary">The rankings service only runs on the Netlify deploy (it isn’t available here). You can still import a CSV below.</li>`;
+  else if (R.status === 'error') remote = `<li class="error">${esc(R.error)}</li>`;
+  else remote = '';
+  const csvRow = csv?.rows?.length ? `<li>${sw('csv', !S.srcOff.csv)}<div class="grow"><div class="name">Imported file</div><div class="meta">${csv.rows.length} rows · week ${csv.week}${per('csv') ? ` · ${per('csv').matched} matched` : ''}${csv.week !== S.ctx.week ? ' · out of date, ignored' : ''}</div></div><button class="btn plain" data-action="clear-rankings">Remove</button></li>` : '';
+  return `<section class="card flush"><header><h2 class="title3">Expert rankings</h2>
+      <span class="chip ${stats ? 'green' : ''}">${stats ? `${stats.matched} players ranked` : 'Not loaded'}</span></header>
+    <div style="padding:0 var(--s3) var(--s2)">
+      <p class="subhead secondary" style="margin:0">Pages are chosen to match your league: <b style="color:var(--label)">${esc(prof.label)}</b>. Each source’s positional rank is turned into points for your scoring, averaged across sources, then blended into the projection last.</p>
+      ${prof.tePremium ? '<p class="footnote" style="margin:8px 0 0;color:var(--orange)">Your league has TE premium scoring, which these rankings don’t account for. Treat TE ranks with caution.</p>' : ''}
+    </div>
+    <ul class="list plain">${remote}${csvRow}</ul>
+    <div class="row wrap" style="padding:var(--s2) var(--s3) var(--s3)">
       <label class="btn"><span class="row" style="gap:8px">${icon('upload', 18)}Import CSV</span><input type="file" accept=".csv,text/csv" data-rankings hidden></label>
-      ${saved ? '<button class="btn plain" data-action="clear-rankings">Remove</button>' : ''}
+      ${R.status === 'ok' || R.status === 'error' ? `<button class="btn" data-action="refresh-ranks">${icon('refresh', 18)}Refresh</button>` : ''}
       <span class="grow"></span>
       <div class="segmented" role="group" aria-label="Expert weight">${weights.map(([w, l]) => `<button data-xw="${w}" aria-pressed="${S.expertWeight === w}">${l}</button>`).join('')}</div>
     </div>
-    ${S.rankMsg ? `<p class="footnote ${S.rankMsg.err ? 'error' : 'secondary'}" style="margin:12px 0 0" role="status">${esc(S.rankMsg.text)}</p>` : ''}
+    ${S.rankMsg ? `<p class="footnote ${S.rankMsg.err ? 'error' : 'secondary'}" style="margin:0 var(--s3) var(--s3)" role="status">${esc(S.rankMsg.text)}</p>` : ''}
   </section>`;
 }
 
@@ -540,14 +606,15 @@ async function importRankings(file) {
     const keep = prev && prev.week === S.ctx.week ? prev.rows.filter(r => !incoming.has(r.pos)) : [];
     store.set('rankings', { week: S.ctx.week, rows: [...keep, ...rows] });
     applyExpert();
-    const st = S.ctx.expertStats;
-    S.rankMsg = { text: `Imported ${rows.length} rankings (${[...incoming].join(', ')}). ${st.matched} players matched${st.unmatched ? `, ${st.unmatched} not found on Sleeper` : ''}.` };
+    const m = S.ctx.expertStats?.perSource.find(x => x.id === 'csv');
+    S.rankMsg = { text: `Imported ${rows.length} rankings (${[...incoming].join(', ')}). ${m?.matched ?? 0} players matched${m?.unmatched ? `, ${m.unmatched} not found on Sleeper` : ''}.` };
   } catch (err) { S.rankMsg = { err: true, text: err.message }; }
   render();
 }
 
 $app.addEventListener('change', (e) => {
   const t = e.target;
+  if (t.dataset.src) { S.srcOff[t.dataset.src] = !t.checked; store.set('srcOff', S.srcOff); applyExpert(); return render(); }
   if (t.dataset.rankings !== undefined) { if (t.files[0]) importRankings(t.files[0]); return; }
   if (t.dataset.pick) {
     const set = S.builder[t.dataset.pick];

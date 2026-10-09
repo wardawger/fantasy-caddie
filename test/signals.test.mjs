@@ -129,16 +129,16 @@ test('expert rank blends toward the points a rank is worth, and never revives Ou
   const lowWR = wr.sort((a, b) => c.values[a.id].week - c.values[b.id].week)[0];
   const before = c.values[lowWR.id].week;
   const out = Object.values(c.players).find(p => p.injury === 'Out' && c.values[p.id]);
-  c.expertWeek = c.week; c.expertWeight = 0.4;
-  c.expertRows = [
+  c.expertWeight = 0.4;
+  c.expertSets = [{ id: 'x', name: 'X', week: c.week, rows: [
     { name: lowWR.name, team: lowWR.team, pos: 'WR', rank: 1, posRank: 1 },
     { name: out.name, team: out.team, pos: out.pos, rank: 1, posRank: 1 },
-  ];
+  ] }];
   finish(c);
   assert.ok(c.values[lowWR.id].week > before + 1, `${before} → ${c.values[lowWR.id].week}`);
   assert.ok(c.values[lowWR.id].breakdown.steps.some(s => s.key === 'expert'));
   assert.equal(c.values[out.id].week, 0);
-  c.expertWeek = c.week + 1; finish(c);                                  // wrong week → ignored
+  c.expertSets[0].week = c.week + 1; finish(c);                                  // wrong week → ignored
   assert.equal(c.values[lowWR.id].week, before);
 });
 
