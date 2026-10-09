@@ -1,8 +1,9 @@
 import { sleeper } from './sleeper.js';
-import { loadLeagueContext } from './data.js';
+import { loadLeagueContext, finish } from './data.js';
 import { demoContext } from './demo.js';
 import * as E from './engine.js';
 import { icon } from './icons.js';
+import { fmtKickoff, isLocked, parseRankingsCSV } from './signals.js';
 
 const $app = document.getElementById('app');
 const TABS = [
@@ -22,7 +23,7 @@ const S = {
   screen: 'onboard', username: store.get('username') ?? '', user: null, leagues: [], error: null, step: '',
   ctx: null, me: null, tab: location.hash.slice(1) || 'overview',
   waiverPos: 'ALL', tradeMode: 'suggested', builder: { partner: null, give: new Set(), get: new Set() },
-  memo: {},
+  memo: {}, open: new Set(), expertWeight: store.get('xw') ?? 0.25, rankMsg: null,
 };
 
 // ---------- helpers ----------
@@ -76,13 +77,23 @@ function startDemo() {
 }
 
 function startApp(ctx, me) {
-  S.memo = {};
+  S.memo = {}; S.open = new Set(); S.rankMsg = null;
+  S.ctx = ctx; applyExpert();
   S.builder = { partner: ctx.rosters.find(r => r.roster_id !== me.roster_id)?.roster_id ?? null, give: new Set(), get: new Set() };
   setState({ ctx, me, screen: 'app' });
 }
 
+function applyExpert() {
+  const saved = store.get('rankings');
+  const c = S.ctx;
+  c.expertRows = saved?.rows ?? null; c.expertWeek = saved?.week ?? null; c.expertWeight = S.expertWeight;
+  finish(c);
+  S.memo = {};
+}
+
 // ---------- computed ----------
-const lineup = () => memo('lineup', () => E.startSit(S.me, S.ctx.league, S.ctx.players, S.ctx.values));
+const isLockedId = (id) => !!P(id)?.team && isLocked(P(id).team, S.ctx.slate);
+const lineup = () => memo('lineup', () => E.startSit(S.me, S.ctx.league, S.ctx.players, S.ctx.values, E.lockedMap(S.me.players ?? [], S.ctx.players, S.ctx.slate)));
 const analysis = () => memo('analysis', () => E.analyzeLeague(S.ctx.rosters, S.ctx.league, S.ctx.players, S.ctx.values));
 const myTeam = () => analysis().teams.find(t => t.rosterId === S.me.roster_id);
 const fas = () => memo('fas', () => E.freeAgentTargets(S.me, S.ctx.rosters, S.ctx.league, S.ctx.players, S.ctx.values));
@@ -98,24 +109,69 @@ const fab = () => {
 const trades = () => memo('trades', () => E.suggestTrades({ myRoster: S.me, rosters: S.ctx.rosters, league: S.ctx.league, players: S.ctx.players, values: S.ctx.values, week: S.ctx.week }));
 
 // ---------- components ----------
-function playerRow(id, { trail = '', sub = '', notes = true, slot = null, interactive = false, extra = '' } = {}) {
+const ago = (iso) => {
+  const h = (Date.now() - Date.parse(iso)) / 36e5;
+  return !(h >= 0) ? '' : h < 1 ? 'just now' : h < 24 ? `${Math.round(h)}h ago` : `${Math.round(h / 24)}d ago`;
+};
+const gameLabel = (v) => v?.gameState === 'post' ? 'Final' : v?.gameState === 'in' ? 'In progress' : fmtKickoff(v?.kickoff);
+const recentNews = (id) => (S.ctx.news?.[id] ?? []).filter(n => !n.published || Date.now() - Date.parse(n.published) < 2 * 864e5);
+
+function playerRow(id, { trail = '', sub = '', notes = true, slot = null, interactive = false, extra = '', why = false } = {}) {
   const p = P(id); const v = V(id);
   if (!p) return `<li><span class="pbadge slot">${esc(slot ?? '—')}</span><div class="grow"><div class="name secondary">Empty</div></div></li>`;
-  const meta = [slot && slot !== p.pos ? slot.replace('_', ' ') : null, p.team ?? 'FA', v?.opponent ? `vs ${v.opponent}` : null, sub].filter(Boolean).join(' · ');
-  return `<li class="${interactive ? 'interactive' : ''}">
+  const meta = [slot && slot !== p.pos ? slot.replace('_', ' ') : null, p.team ?? 'FA', v?.opponent ? `vs ${v.opponent}` : null, gameLabel(v), sub].filter(Boolean).join(' · ');
+  const chips = [...(notes ? (v?.notes ?? []).map(noteChip) : [])];
+  if (isLockedId(id)) chips.unshift(`<span class="chip">${icon('lock', 12)}Locked · game ${v?.gameState === 'post' ? 'final' : 'started'}</span>`);
+  if (notes && recentNews(id).length) chips.push(`<span class="chip blue">${icon('news', 12)}News</span>`);
+  const open = why && S.open.has(id);
+  return `<li class="${interactive ? 'interactive' : ''} ${why ? 'has-why' : ''}">
     <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
     <div class="grow">
       <div class="name">${esc(p.name)}</div>
       <div class="meta">${esc(meta)}</div>
-      ${notes && v?.notes?.length ? `<div class="chips">${v.notes.map(noteChip).join('')}</div>` : ''}${extra}
+      ${chips.length ? `<div class="chips">${chips.join('')}</div>` : ''}${extra}
     </div>
     <div class="trail">${trail}</div>
+    ${why && v ? `<button class="why-toggle" data-why="${esc(id)}" aria-expanded="${open}" aria-label="Why ${esc(p.name)} is projected ${f1(v.week)} points">${icon('chevron', 18)}</button>` : ''}
+    ${open && v ? breakdownPanel(id) : ''}
   </li>`;
 }
 function noteChip(n) {
-  const map = { injury: ['red', 'cross'], bye: ['orange', 'calendar'], weather: [n.good ? 'green' : 'orange', 'wind'], matchup: [n.good ? 'green' : 'red', 'target'] };
+  const map = { injury: ['red', 'cross'], bye: ['orange', 'calendar'], weather: [n.good ? 'green' : 'orange', 'wind'], matchup: [n.good ? 'green' : 'red', 'target'],
+    usage: [n.good ? 'green' : 'orange', 'chart'], vegas: [n.good ? 'green' : 'orange', 'chart'] };
   const [c, ic] = map[n.kind] ?? ['', 'info'];
   return `<span class="chip ${c}">${icon(ic, 12)}${esc(n.text)}</span>`;
+}
+
+function breakdownPanel(id) {
+  const v = V(id); const b = v.breakdown; const f = b.facts; const p = P(id);
+  const none = (t) => `<li class="secondary">${t}</li>`;
+  const pct = (x) => (x == null ? '–' : `${Math.round(x * 100)}%`);
+  const rows = b.steps.map(st => `<tr><td>${esc(st.label)}<div class="caption secondary">${esc(st.detail)}</div></td>
+      <td class="r num">×${st.mult.toFixed(2)}</td><td class="r num ${cls(st.delta)}">${signed(st.delta)}</td><td class="r num">${f1(st.after)}</td></tr>`).join('');
+  const u = f.usage, env = f.env;
+  const facts = [];
+  facts.push(u
+    ? `<li><b>Usage</b> · snaps ${pct(u.snap.l3)} last 3 (season ${pct(u.snap.season)})${u.tgt.l3 != null ? ` · target share ${pct(u.tgt.l3)} (${pct(u.tgt.season)}) · ${u.tgtPerGame} tgt/g` : ''}${p.pos === 'RB' && u.rush.l3 != null ? ` · rush share ${pct(u.rush.l3)} (${pct(u.rush.season)})` : ''}</li>`
+    : none(['RB', 'WR', 'TE'].includes(p.pos) ? '<b>Usage</b> · not enough snap data yet (needs 4+ games)' : '<b>Usage</b> · not tracked for this position'));
+  facts.push(env
+    ? `<li><b>Game</b> · ${env.home ? 'vs' : '@'} ${esc(env.opp)} · ${esc(gameLabel(v) ?? 'time TBD')}${env.total ? ` · O/U ${env.total}` : ''}${env.margin != null ? ` · ${env.margin > 0 ? `favored by ${env.margin}` : env.margin < 0 ? `${-env.margin}-pt underdog` : 'pick’em'}` : ''}${env.implied != null ? ` · implied ${f1(env.implied)} pts` : ' · no betting line'}</li>`
+    : none('<b>Game</b> · schedule/line data unavailable'));
+  facts.push(isLockedId(id) ? `<li><b>Lineup lock</b> · this game has started, so he can’t be moved in Sleeper</li>` : env?.kickoff ? `<li><b>Lineup lock</b> · locks at kickoff, ${esc(fmtKickoff(env.kickoff))}</li>` : '');
+  facts.push(f.expert
+    ? `<li><b>Expert rank</b> · ${p.pos}${f.expert.posRank} (≈ ${f1(f.expert.pts)} pts in this league) · weighted ${Math.round(S.expertWeight * 100)}%</li>`
+    : none('<b>Expert rank</b> · none imported for this player'));
+  const news = (S.ctx.news?.[id] ?? []);
+  facts.push(news.length
+    ? `<li><b>News</b> (shown for context; it doesn’t change the number)<ul class="news">${news.map(n => `<li>${n.url ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.headline)}</a>` : esc(n.headline)} <span class="secondary">${esc(ago(n.published))}</span>${n.description ? `<div class="caption secondary">${esc(n.description)}</div>` : ''}</li>`).join('')}</ul></li>`
+    : none('<b>News</b> · nothing recent'));
+  return `<div class="why" role="region" aria-label="Projection breakdown for ${esc(p.name)}">
+    <div class="scroll-x"><table class="tbl compact"><thead><tr><th>Factor</th><th class="r">Effect</th><th class="r">Pts</th><th class="r">Running</th></tr></thead><tbody>
+      <tr><td>${esc(b.baseLabel)}</td><td></td><td></td><td class="r num">${f1(b.base)}</td></tr>${rows}
+      <tr class="me"><td>Projected this week</td><td></td><td class="r num ${cls(b.final - b.base)}">${signed(b.final - b.base)}</td><td class="r num">${f1(b.final)}</td></tr>
+    </tbody></table></div>
+    <ul class="facts">${facts.join('')}</ul>
+  </div>`;
 }
 const kpi = (label, ic, value, unit = '', delta = '') =>
   `<div class="card kpi"><div class="label">${icon(ic, 16)}${esc(label)}</div><div class="value">${value}${unit ? `<small>${unit}</small>` : ''}</div>${delta ? `<div class="delta">${delta}</div>` : ''}</div>`;
@@ -243,29 +299,73 @@ function powerTable(a, limit = Infinity) {
   </tbody></table>`;
 }
 
+function sourcesCard() {
+  const so = S.ctx.sources;
+  const chip = (ok, label, detail) => `<span class="chip ${ok ? 'green' : ''}">${icon(ok ? 'check' : 'info', 12)}${esc(label)}${detail ? ` · ${esc(detail)}` : ''}</span>`;
+  const n = (o) => Object.keys(o ?? {}).length;
+  return `<section class="card"><header><h2 class="title3">Data behind these numbers</h2></header>
+    <div class="chips" style="margin:0">
+      ${chip(so.projections, 'Sleeper projections')}
+      ${chip(so.lines, 'Vegas lines', so.lines ? `${n(S.ctx.slate) / 2} games` : 'unavailable')}
+      ${chip(so.kickoffs, 'Kickoff times')}
+      ${chip(so.usage, 'Snap & target share', so.usage ? `${n(S.ctx.usage)} players` : 'not enough games yet')}
+      ${chip(so.weather, 'Weather')}
+      ${chip(so.news, 'News', so.news ? `${n(S.ctx.news)} players` : 'unavailable')}
+      ${chip(so.experts > 0, 'Expert rankings', so.experts ? `${so.experts} matched` : 'none imported')}
+    </div>
+    <p class="footnote secondary" style="margin:12px 0 0">Open any player’s <b>chevron</b> to see his base projection and each adjustment in order. Grey items weren’t available, so they are left out of the math instead of guessed.</p>
+  </section>`;
+}
+
+function expertCard() {
+  const saved = store.get('rankings');
+  const stale = saved && saved.week !== S.ctx.week;
+  const st = S.ctx.expertStats;
+  const weights = [[0, 'Off'], [0.15, 'Light'], [0.25, 'Medium'], [0.4, 'Heavy']];
+  return `<section class="card"><header><h2 class="title3">Expert rankings</h2>
+      ${saved ? `<span class="chip ${stale ? 'orange' : 'green'}">${stale ? `Week ${saved.week} file · out of date` : `Week ${saved.week} · ${st?.matched ?? 0} matched`}</span>` : '<span class="chip">Optional</span>'}</header>
+    <p class="subhead secondary" style="margin:0 0 var(--s2)">No free service offers expert rankings to a web app, so import a CSV export (for example a FantasyPros weekly rankings file, usually available with a free account). Each positional rank is translated into points for <i>your</i> scoring and blended in last. Import QB/RB/WR/TE, K and DST files one after another and they merge.</p>
+    <div class="row wrap">
+      <label class="btn"><span class="row" style="gap:8px">${icon('upload', 18)}Import CSV</span><input type="file" accept=".csv,text/csv" data-rankings hidden></label>
+      ${saved ? '<button class="btn plain" data-action="clear-rankings">Remove</button>' : ''}
+      <span class="grow"></span>
+      <div class="segmented" role="group" aria-label="Expert weight">${weights.map(([w, l]) => `<button data-xw="${w}" aria-pressed="${S.expertWeight === w}">${l}</button>`).join('')}</div>
+    </div>
+    ${S.rankMsg ? `<p class="footnote ${S.rankMsg.err ? 'error' : 'secondary'}" style="margin:12px 0 0" role="status">${esc(S.rankMsg.text)}</p>` : ''}
+  </section>`;
+}
+
 function viewLineup() {
   const lu = lineup(); const bench = lu.best.bench;
   const weatherIds = [...lu.best.starters].filter(id => V(id)?.notes.some(n => n.kind === 'weather'));
-  return `<div class="stack">
-    <div class="callout">${icon('sparkles', 22)}<div>
-      <div class="headline">Optimal lineup projects ${f1(lu.best.total)} pts</div>
-      <div class="subhead secondary">${lu.gain > 0.2 ? `That’s <b class="pos">${signed(lu.gain)}</b> over the lineup currently set in Sleeper.` : 'Your saved lineup already matches the optimal one.'} Projections are adjusted for injuries, byes, defensive matchup and game-day weather.</div>
-    </div></div>
-    ${lu.moves.length ? `<section class="card flush"><header><h2 class="title3">Recommended moves</h2></header><div class="stack" style="padding:var(--s2) var(--s3) var(--s3)">
-      ${lu.moves.map(m => `<div class="swap">
+  const lockedStarters = lu.best.slots.filter(s => s.locked);
+  const moveHtml = (m) => {
+    const why = E.explainMove(m.start, m.sit, S.ctx.values, S.ctx.players);
+    return `<div class="stack" style="gap:8px"><div class="swap">
         <div class="side"><div class="caption secondary">START</div><ul class="list plain" style="margin:0 calc(-1 * var(--s3))">${m.start ? playerRow(m.start, { trail: `<div class="big num">${f1(V(m.start)?.week)}</div>` }) : '<li class="secondary">—</li>'}</ul></div>
         <div class="arrow">${icon('swap', 24)}</div>
         <div class="side"><div class="caption secondary">SIT</div><ul class="list plain" style="margin:0 calc(-1 * var(--s3))">${m.sit ? playerRow(m.sit, { trail: `<div class="big num">${f1(V(m.sit)?.week)}</div>` }) : '<li class="secondary">Open slot</li>'}</ul></div>
-      </div>`).join('<hr style="border:0;border-top:.5px solid var(--separator);margin:0">')}
+      </div>
+      <div class="callout" style="padding:12px">${icon('info', 20)}<div class="footnote"><b>Why (${signed(m.gain)} pts):</b><br>${why.map(esc).join('<br>')}</div></div></div>`;
+  };
+  return `<div class="stack">
+    <div class="callout">${icon('sparkles', 22)}<div>
+      <div class="headline">Optimal lineup projects ${f1(lu.best.total)} pts</div>
+      <div class="subhead secondary">${lu.gain > 0.2 ? `That’s <b class="pos">${signed(lu.gain)}</b> over the lineup currently set in Sleeper.` : 'Your saved lineup already matches the optimal one.'}${lockedStarters.length ? ` ${lockedStarters.length} starter${lockedStarters.length > 1 ? 's' : ''} already played and ${lockedStarters.length > 1 ? 'are' : 'is'} locked in.` : ''}</div>
+    </div></div>
+    ${lu.moves.length ? `<section class="card flush"><header><h2 class="title3">Recommended moves</h2></header><div class="stack" style="padding:var(--s2) var(--s3) var(--s3)">
+      ${lu.moves.map(moveHtml).join('<hr style="border:0;border-top:.5px solid var(--separator);margin:0;width:100%">')}
     </div></section>` : ''}
     <div class="grid two">
       <section class="card flush"><header><h2 class="title3">Starters</h2><span class="caption secondary">Projected pts</span></header>
-        <ul class="list">${lu.best.slots.map(s => playerRow(s.id, { slot: s.slot, trail: `<div class="big num">${f1(s.value)}</div><div class="caption secondary">${V(s.id)?.rawWeek != null && Math.abs(V(s.id).rawWeek - s.value) >= 0.1 ? `base ${f1(V(s.id).rawWeek)}` : ''}</div>` })).join('')}</ul>
+        <ul class="list">${lu.best.slots.map(s => playerRow(s.id, { slot: s.slot, why: true, trail: `<div class="big num">${f1(s.value)}</div><div class="caption secondary">${V(s.id)?.rawWeek != null && Math.abs(V(s.id).rawWeek - s.value) >= 0.1 ? `base ${f1(V(s.id).rawWeek)}` : ''}</div>` })).join('')}</ul>
       </section>
       <section class="card flush"><header><h2 class="title3">Bench</h2><span class="caption secondary">Projected pts</span></header>
-        ${bench.length ? `<ul class="list">${bench.map(id => playerRow(id, { trail: `<div class="big num secondary">${f1(V(id)?.week)}</div>` })).join('')}</ul>` : '<div class="empty">No bench players.</div>'}
+        ${bench.length ? `<ul class="list">${bench.map(id => playerRow(id, { why: true, trail: `<div class="big num secondary">${f1(V(id)?.week)}</div>` })).join('')}</ul>` : '<div class="empty">No bench players.</div>'}
       </section>
     </div>
+    ${sourcesCard()}
+    ${expertCard()}
     ${weatherIds.length ? `<section class="card"><header><h2 class="title3">${icon('wind', 20)} Weather watch</h2></header>
       <div class="subhead secondary">${weatherIds.map(id => `<b style="color:var(--label)">${esc(P(id).name)}</b> — ${esc(S.ctx.weather[P(id).team]?.summary)}`).join('<br>')}</div></section>` : ''}
   </div>`;
@@ -407,9 +507,11 @@ $app.addEventListener('submit', (e) => {
 });
 
 $app.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-tab],[data-action],[data-waiverpos],[data-trademode]');
+  const el = e.target.closest('[data-tab],[data-action],[data-waiverpos],[data-trademode],[data-why],[data-xw]');
   if (!el) return;
   if (el.dataset.tab) { location.hash = el.dataset.tab; return; }
+  if (el.dataset.why) { const k = el.dataset.why; S.open.has(k) ? S.open.delete(k) : S.open.add(k); return render(); }
+  if (el.dataset.xw) { S.expertWeight = +el.dataset.xw; store.set('xw', S.expertWeight); applyExpert(); return render(); }
   if (el.dataset.waiverpos) return setState({ waiverPos: el.dataset.waiverpos });
   if (el.dataset.trademode) return setState({ tradeMode: el.dataset.trademode });
   const a = el.dataset.action;
@@ -429,8 +531,24 @@ $app.addEventListener('keydown', (e) => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('li[role="button"]')) { e.preventDefault(); e.target.click(); }
 });
 
+async function importRankings(file) {
+  try {
+    const rows = parseRankingsCSV(await file.text());
+    if (rows.length < 5) throw new Error('That file has no recognizable rankings. It needs columns like RK, PLAYER NAME, TEAM and POS.');
+    const incoming = new Set(rows.map(r => r.pos));
+    const prev = store.get('rankings');
+    const keep = prev && prev.week === S.ctx.week ? prev.rows.filter(r => !incoming.has(r.pos)) : [];
+    store.set('rankings', { week: S.ctx.week, rows: [...keep, ...rows] });
+    applyExpert();
+    const st = S.ctx.expertStats;
+    S.rankMsg = { text: `Imported ${rows.length} rankings (${[...incoming].join(', ')}). ${st.matched} players matched${st.unmatched ? `, ${st.unmatched} not found on Sleeper` : ''}.` };
+  } catch (err) { S.rankMsg = { err: true, text: err.message }; }
+  render();
+}
+
 $app.addEventListener('change', (e) => {
   const t = e.target;
+  if (t.dataset.rankings !== undefined) { if (t.files[0]) importRankings(t.files[0]); return; }
   if (t.dataset.pick) {
     const set = S.builder[t.dataset.pick];
     t.checked ? set.add(t.value) : set.delete(t.value);

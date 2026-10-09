@@ -20,6 +20,9 @@ const PATHS = {
   refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4.5H15"/>',
   logout: '<path d="M14 4.5H7a2.5 2.5 0 0 0-2.5 2.5v10A2.5 2.5 0 0 0 7 19.5h7"/><path d="M11 12h9.5M17 8.5l3.5 3.5-3.5 3.5"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="M8 12.3l2.7 2.7L16 9.5"/>',
+  lock: '<rect x="5" y="10.5" width="14" height="10" rx="3"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>',
+  news: '<rect x="4" y="4.5" width="16" height="15" rx="3"/><path d="M8 9h8M8 12.5h8M8 16h4.5"/>',
+  upload: '<path d="M12 15.5V4.5M7.5 9L12 4.5 16.5 9"/><path d="M5 14v3.5A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5V14"/>',
   slider: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
 };
 

@@ -8,7 +8,7 @@ const POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
 
 const memo = new Map();
 
-async function getJSON(url, { ttl = 10 * 60e3, persist = false } = {}) {
+export async function getJSON(url, { ttl = 10 * 60e3, persist = false } = {}) {
   const hit = memo.get(url);
   if (hit && Date.now() - hit.t < ttl) return hit.v;
   if (persist) {
@@ -44,10 +44,10 @@ export const sleeper = {
 
   // ~5 MB raw; trimmed to the fields we use and cached for a day.
   async players() {
-    const key = `${V1}/players/nfl#trim`;
+    const key = `${V1}/players/nfl#trim2`;
     const stored = readStore(key);
-    if (stored && Date.now() - stored.t < 864e5) return stored.v;
-    const raw = await getJSON(`${V1}/players/nfl`, { ttl: 864e5 });
+    if (stored && Date.now() - stored.t < 4 * 36e5) return stored.v; // injury status lives here, so refresh a few times a day
+    const raw = await getJSON(`${V1}/players/nfl`, { ttl: 4 * 36e5 });
     const out = {};
     for (const [id, p] of Object.entries(raw)) {
       const pos = p.fantasy_positions?.[0] ?? p.position;
@@ -60,6 +60,7 @@ export const sleeper = {
         injury: p.injury_status ?? null,
         injuryNote: [p.injury_body_part, p.injury_notes].filter(Boolean).join(' – ') || null,
         depth: p.depth_chart_order ?? null,
+        espnId: p.espn_id ?? null,
       };
     }
     writeStore(key, { t: Date.now(), v: out });

@@ -2,6 +2,7 @@
 import { finish } from './data.js';
 import { describe } from './weather.js';
 import { isDome } from './weather.js';
+import { buildSlate } from './signals.js';
 
 const TEAMS = ['ARI','ATL','BAL','BUF','CAR','CHI','CIN','CLE','DAL','DEN','DET','GB','HOU','IND','JAX','KC',
   'LV','LAC','LAR','MIA','MIN','NE','NO','NYG','NYJ','PHI','PIT','SF','SEA','TB','TEN','WAS'];
@@ -111,6 +112,38 @@ export function demoContext() {
     wx.summary = describe(wx);
     weather[t] = wx;
   }
-  return finish({ demo: true, league, rosters, users, players, scoring: league.scoring_settings, week, season: '2026',
-    weekProj, seasonProj, seasonStats, dvp: {}, weather, byes: { MIA: 6, KC: 6 }, myRosterId: 1 });
+  const dvp = Object.fromEntries(TEAMS.map(t => [t, Object.fromEntries(Object.keys(counts).map(pos => [pos, 0.84 + r() * 0.32]))]));
+  // Slate: pair teams (KC and MIA are on bye). One early game is final, one live, the rest upcoming.
+  const playing = TEAMS.filter(t => t !== 'KC' && t !== 'MIA');
+  const DAY = 864e5, now = Date.now();
+  const games = [];
+  for (let i = 0; i + 1 < playing.length; i += 2) {
+    const g = i / 2;
+    const kickoff = g === 0 ? now - 2 * DAY + 4 * 36e5 : g === 1 ? now - 36e5 : now + DAY + (g % 3) * 3 * 36e5;
+    const total = Math.round((38 + r() * 16) * 2) / 2, margin = Math.round(r() * 12 * 2) / 2;
+    const fav = r() < 0.5 ? playing[i] : playing[i + 1];
+    games.push({ home: playing[i], away: playing[i + 1], kickoff: new Date(kickoff).toISOString(), state: g === 0 ? 'post' : g === 1 ? 'in' : 'pre',
+      indoor: isDome(playing[i]), total, margin, favorite: margin ? fav : null });
+  }
+  const slate = buildSlate(games);
+  for (const id of Object.keys(weekProj)) { const g = slate[players[id].team]; if (g) weekProj[id].opponent = g.opp; }
+  // Usage: most players steady, some risers and fallers over the last three games.
+  const usage = {};
+  for (const p of Object.values(players)) {
+    if (!['RB', 'WR', 'TE'].includes(p.pos)) continue;
+    const snap = 0.35 + r() * 0.55, tgt = p.pos === 'RB' ? 0.04 + r() * 0.08 : 0.08 + r() * 0.18, rush = p.pos === 'RB' ? 0.15 + r() * 0.5 : null;
+    const t = r() < 0.12 ? 1.35 : r() < 0.24 ? 0.7 : 1 + (r() - 0.5) * 0.1;
+    usage[p.id] = { games: 5, snap: { l3: Math.min(0.98, snap * t), season: snap }, tgt: { l3: tgt * t, season: tgt },
+      rush: { l3: rush == null ? null : rush * t, season: rush }, tgtPerGame: Math.round(tgt * t * 35 * 10) / 10 };
+  }
+  // News for a handful of players, including some on your roster.
+  const news = {};
+  const headline = (p) => p.injury ? [`${p.name} ${p.injury === 'Out' ? 'ruled out' : 'limited in practice'} with ${String(p.injuryNote).toLowerCase()}`, 'Coach says the team will make a decision closer to kickoff.']
+    : [`${p.name} expected to see an expanded role`, 'Offensive coordinator says the plan is to get him more touches.'];
+  for (const id of [...rosters[0].players.slice(0, 7), ...Object.keys(players).filter(id => players[id].injury).slice(0, 4)]) {
+    const [h, d] = headline(players[id]);
+    news[id] = [{ headline: h, description: d, published: new Date(now - 5 * 36e5).toISOString(), url: null }];
+  }
+  return finish({ demo: true, slate, usage, news, league, rosters, users, players, scoring: league.scoring_settings, week, season: '2026',
+    weekProj, seasonProj, seasonStats, dvp, weather, byes: { MIA: 6, KC: 6 }, myRosterId: 1 });
 }

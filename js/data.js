@@ -1,6 +1,8 @@
 // Assembles everything the engine needs for one league and week.
 import { sleeper, indexByPlayer } from './sleeper.js';
 import { gameWeather } from './weather.js';
+import { fetchSlate, fetchNews } from './espn.js';
+import { buildSlate, slateAverage, buildUsage, newsByPlayer, matchRankings } from './signals.js';
 import { addVOR, buildDvP, buildValues, fantasyPoints, LAST_WEEK } from './engine.js';
 
 export async function loadLeagueContext(leagueId, onStep = () => {}) {
@@ -16,10 +18,12 @@ export async function loadLeagueContext(leagueId, onStep = () => {}) {
 
   onStep('Loading projections & stats');
   const pastWeeks = Array.from({ length: week - 1 }, (_, i) => i + 1);
-  const [weekProjRaw, seasonProjRaw, schedule, ...pastRaw] = await Promise.all([
+  const [weekProjRaw, seasonProjRaw, schedule, slateGames, newsItems, ...pastRaw] = await Promise.all([
     sleeper.projections(season, week).catch(() => []),
     sleeper.seasonProjections(season).catch(() => []),
     sleeper.schedule(season).catch(() => []),
+    fetchSlate(season, week),
+    fetchNews(),
     ...pastWeeks.map(w => sleeper.weekStats(season, w).catch(() => [])),
   ]);
   const weekProj = indexByPlayer(weekProjRaw);
@@ -43,11 +47,27 @@ export async function loadLeagueContext(leagueId, onStep = () => {}) {
   const weather = await gameWeather(games).catch(() => ({}));
 
   return finish({ league, rosters, users, players, scoring, week, season, weekProj, seasonProj, seasonStats,
-    dvp: buildDvP(pastStats, players, scoring), weather, byes, games });
+    dvp: buildDvP(pastStats, players, scoring), weather, byes, games,
+    slate: slateGames ? buildSlate(slateGames) : null, newsItems, usage: buildUsage(pastStats, players) });
 }
 
 export function finish(ctx) {
+  ctx.slateAvg = slateAverage(ctx.slate);
+  ctx.news ??= ctx.newsItems ? newsByPlayer(ctx.newsItems, ctx.players) : null;
+  // Imported expert rankings only apply to the week they were exported for.
+  const er = ctx.expertRows && ctx.expertWeek === ctx.week ? matchRankings(ctx.expertRows, ctx.players) : null;
+  ctx.expert = er?.map ?? null;
+  ctx.expertStats = er ? { matched: Object.keys(er.map).length, unmatched: er.unmatched } : null;
   ctx.values = buildValues(ctx);
+  ctx.sources = {
+    projections: Object.keys(ctx.weekProj ?? {}).length > 0,
+    lines: Object.values(ctx.slate ?? {}).some(g => g.implied != null),
+    kickoffs: Object.keys(ctx.slate ?? {}).length > 0,
+    usage: Object.keys(ctx.usage ?? {}).length > 0,
+    news: !!ctx.news && Object.keys(ctx.news).length > 0,
+    weather: Object.keys(ctx.weather ?? {}).length > 0,
+    experts: ctx.expertStats?.matched ?? 0,
+  };
   ctx.replacement = addVOR(ctx.values, ctx.players, ctx.league);
   ctx.userById = Object.fromEntries((ctx.users ?? []).map(u => [u.user_id, u]));
   ctx.teamName = (rosterId) => {

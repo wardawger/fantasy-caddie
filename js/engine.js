@@ -1,6 +1,8 @@
 // Pure analytics: projections → player values → lineups, waivers, FAB, trades.
 // No DOM or network here so it can be unit-tested in Node.
 
+import { vegasMultiplier, usageMultiplier, isLocked } from './signals.js';
+
 export const LAST_WEEK = 17;
 
 const SLOT_ELIGIBILITY = {
@@ -95,6 +97,18 @@ export function weatherMultiplier(pos, wx) {
 export function buildValues(ctx) {
   const { players, scoring, week } = ctx;
   const remWeeks = remainingWeeks(week);
+  const xw = ctx.expertWeight ?? 0.25;
+
+  // Distribution of Sleeper's weekly projections per position: lets an expert
+  // positional rank (e.g. WR12) be translated into points in *this* league.
+  const dist = {};
+  for (const p of Object.values(players)) {
+    const wp = ctx.weekProj?.[p.id];
+    const pts = wp ? fantasyPoints(wp.stats, scoring) : 0;
+    if (pts > 0) (dist[p.pos] ??= []).push(pts);
+  }
+  for (const a of Object.values(dist)) a.sort((x, y) => y - x);
+
   const out = {};
   for (const p of Object.values(players)) {
     const wp = ctx.weekProj?.[p.id];
@@ -115,6 +129,7 @@ export function buildValues(ctx) {
     if (!rate) continue;
 
     const notes = [];
+    const steps = [];
     const inj = INJURY[p.injury];
     const bye = ctx.byes?.[p.team];
     const onBye = bye === week;
@@ -122,38 +137,107 @@ export function buildValues(ctx) {
     if (inj) games = Math.max(0, games - inj.gamesLost);
     if (!p.team && p.pos !== 'DEF') games = 0;
 
-    let wk = wkPts ?? rate;
-    if (onBye) { wk = 0; notes.push({ kind: 'bye', text: 'On bye this week' }); }
-    if (inj) {
-      wk *= inj.week;
+    const base = wkPts ?? rate;
+    let cur = base;
+    const step = (key, label, mult, detail) => {
+      const next = cur * mult;
+      steps.push({ key, label, mult: Math.round(mult * 1000) / 1000, delta: round1(next - cur), after: round1(next), detail });
+      cur = next;
+    };
+
+    if (onBye) { step('bye', 'Bye week', 0, 'Team is not playing'); notes.push({ kind: 'bye', text: 'On bye this week' }); }
+    if (inj && cur > 0) {
+      step('injury', `Injury: ${p.injury}`, inj.week, p.injuryNote ?? 'No detail reported');
       notes.push({ kind: 'injury', text: `${p.injury}${p.injuryNote ? ` · ${p.injuryNote}` : ''}` });
-    }
-    const opp = wp?.opponent ?? null;
+    } else if (inj) notes.push({ kind: 'injury', text: `${p.injury}${p.injuryNote ? ` · ${p.injuryNote}` : ''}` });
+
+    const env = ctx.slate?.[p.team] ?? null;
+    const opp = wp?.opponent ?? env?.opp ?? null;
+
     const dvp = opp ? ctx.dvp?.[opp]?.[p.pos] : null;
-    if (dvp && !onBye) {
-      wk *= dvp;
+    if (dvp && cur > 0) {
+      step('matchup', `Matchup vs ${opp}`, dvp, `${opp} allow ${Math.round(Math.abs(dvp - 1) * 100)}% ${dvp >= 1 ? 'more' : 'fewer'} ${p.pos} points than average (shrunk toward neutral)`);
       if (dvp >= 1.06) notes.push({ kind: 'matchup', good: true, text: `Soft matchup vs ${opp} (+${Math.round((dvp - 1) * 100)}%)` });
       else if (dvp <= 0.94) notes.push({ kind: 'matchup', good: false, text: `Tough matchup vs ${opp} (${Math.round((dvp - 1) * 100)}%)` });
     }
+
+    const u = ctx.usage?.[p.id];
+    const um = usageMultiplier(p.pos, u);
+    if (um.ok && cur > 0) {
+      const pct = (x) => (x == null ? '–' : `${Math.round(x * 100)}%`);
+      const bits = [`snaps ${pct(u.snap.l3)} (season ${pct(u.snap.season)})`];
+      if (p.pos !== 'RB' || u.tgt.l3 != null) bits.push(`targets ${pct(u.tgt.l3)} (season ${pct(u.tgt.season)})`);
+      if (p.pos === 'RB') bits.push(`rush share ${pct(u.rush.l3)} (season ${pct(u.rush.season)})`);
+      step('usage', 'Recent usage trend', um.mult, `Last 3 games vs season: ${bits.join(', ')}`);
+      if (Math.abs(um.trend) >= 0.1) notes.push({ kind: 'usage', good: um.trend > 0, text: `Role ${um.trend > 0 ? 'growing' : 'shrinking'} (${um.trend > 0 ? '+' : ''}${Math.round(um.trend * 100)}% opportunity)` });
+    }
+
+    if (env && env.implied != null && cur > 0) {
+      const m = vegasMultiplier(p.pos, env, ctx.slateAvg);
+      const fav = env.margin > 0 ? `favored by ${env.margin}` : env.margin < 0 ? `${Math.abs(env.margin)}-pt underdog` : 'pick’em';
+      step('vegas', 'Game script (Vegas)', m, `Implied team total ${round1(env.implied)} (slate avg ${round1(ctx.slateAvg ?? 22.5)}), ${fav}, O/U ${env.total}`);
+      if (Math.abs(m - 1) >= 0.04) notes.push({ kind: 'vegas', good: m > 1, text: `${m > 1 ? 'High' : 'Low'} implied total ${round1(env.implied)} (${m > 1 ? '+' : ''}${Math.round((m - 1) * 100)}%)` });
+    }
+
     const wx = ctx.weather?.[p.team];
-    if (wx && !onBye) {
+    if (wx && cur > 0) {
       const m = weatherMultiplier(p.pos, wx);
-      wk *= m;
+      step('weather', 'Weather', m, wx.summary ?? '');
       if (Math.abs(m - 1) >= 0.02) notes.push({ kind: 'weather', good: m > 1, text: `${wx.summary} (${m > 1 ? '+' : ''}${Math.round((m - 1) * 100)}%)` });
+    }
+
+    // Expert consensus is blended last, and never lifts a player who is out or on bye.
+    const ex = ctx.expert?.[p.id];
+    const d = dist[p.pos];
+    let expertPts = null;
+    if (ex && d?.length) {
+      expertPts = d[Math.min(ex.posRank, d.length) - 1];
+      if (xw > 0 && cur > 0) {
+        step('expert', `Expert consensus (${p.pos}${ex.posRank})`, (cur * (1 - xw) + expertPts * xw) / cur,
+          `A ${p.pos}${ex.posRank} is worth about ${round1(expertPts)} pts in this league; blended at ${Math.round(xw * 100)}%`);
+      }
     }
 
     out[p.id] = {
       id: p.id,
-      week: round1(wk),
+      week: round1(cur),
       rawWeek: wkPts == null ? null : round1(wkPts),
       rate: round1(rate),
       ros: round1(rate * Math.max(0, games)),
       notes,
       opponent: opp,
+      kickoff: env?.kickoff ?? null,
+      gameState: env?.state ?? null,
+      breakdown: {
+        base: round1(base), baseLabel: wkPts == null ? 'Season average (no weekly projection)' : 'Sleeper weekly projection',
+        steps, final: round1(cur),
+        facts: { usage: u ?? null, env, expert: ex ? { ...ex, pts: round1(expertPts ?? 0) } : null },
+      },
     };
   }
   return out;
 }
+
+/**
+ * Plain-English reasons for a swap: the base projections and the two biggest
+ * adjustments (by points) on each side.
+ */
+const shortLabel = (l) => l.replace(/^Injury: /, '').replace(/^(Matchup|Weather|Bye|Game|Recent|Expert)/, m => m.toLowerCase());
+
+export function explainMove(startId, sitId, values, players) {
+  const line = (id, verb) => {
+    const v = values[id]; const p = players[id];
+    if (!v || !p) return null;
+    const top = [...v.breakdown.steps].filter(s => Math.abs(s.delta) >= 0.3)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 2)
+      .map(s => `${shortLabel(s.label)} ${s.delta > 0 ? '+' : '−'}${Math.abs(s.delta).toFixed(1)}`);
+    return `${verb} ${p.name}: ${v.breakdown.base.toFixed(1)} → ${v.week.toFixed(1)} pts${top.length ? ` (${top.join(', ')})` : ' (no adjustments)'}`;
+  };
+  return [startId ? line(startId, 'Start') : null, sitId ? line(sitId, 'Sit') : null].filter(Boolean);
+}
+
+export const lockedMap = (ids, players, slate, now = Date.now()) =>
+  Object.fromEntries(ids.filter(id => players[id]?.team && isLocked(players[id].team, slate, now)).map(id => [id, true]));
 
 /**
  * Value over replacement: ROS points above the best player you could expect to
@@ -194,26 +278,37 @@ const round1 = (n) => Math.round(n * 10) / 10;
  * Greedy optimal lineup: fill the most restrictive slots first, each with the
  * best remaining eligible player. key: 'week' | 'ros' | 'rate'.
  */
-export function optimalLineup(ids, rosterPositions, players, values, key = 'ros') {
+export function optimalLineup(ids, rosterPositions, players, values, key = 'ros', opts = {}) {
+  const fixed = opts.fixed ?? new Map();      // slot index -> player already locked into it
+  const exclude = opts.exclude ?? new Set();  // players who cannot be moved into the lineup
+  const fixedIds = new Set(fixed.values());
   const slots = rosterPositions
     .map((s, i) => ({ slot: s, i }))
     .filter(s => isStartingSlot(s.slot))
     .sort((a, b) => SLOT_ELIGIBILITY[a.slot].length - SLOT_ELIGIBILITY[b.slot].length || a.i - b.i);
-  const pool = ids
+  const all = ids
     .filter(id => players[id])
     .map(id => ({ id, pos: players[id].pos, v: values[id]?.[key] ?? 0 }))
     .sort((a, b) => b.v - a.v);
+  const pool = all.filter(p => !exclude.has(p.id) && !fixedIds.has(p.id));
   const used = new Set();
   const filled = [];
   let total = 0;
   for (const s of slots) {
+    const fid = fixed.get(s.i);
+    if (fid && players[fid]) {
+      const v = values[fid]?.[key] ?? 0;
+      used.add(fid); total += v;
+      filled.push({ slot: s.slot, i: s.i, id: fid, value: v, locked: true });
+      continue;
+    }
     const ok = SLOT_ELIGIBILITY[s.slot];
     const pick = pool.find(p => !used.has(p.id) && ok.includes(p.pos));
     if (pick) { used.add(pick.id); total += pick.v; }
     filled.push({ slot: s.slot, i: s.i, id: pick?.id ?? null, value: pick?.v ?? 0 });
   }
   filled.sort((a, b) => a.i - b.i);
-  return { slots: filled, total: round1(total), starters: used, bench: pool.filter(p => !used.has(p.id)).map(p => p.id) };
+  return { slots: filled, total: round1(total), starters: used, bench: all.filter(p => !used.has(p.id)).map(p => p.id) };
 }
 
 // Starters plus a little credit for depth (bye/injury insurance), so trades
@@ -228,11 +323,15 @@ const rosterIds = (r) => (r.players ?? []).filter(id => !(r.reserve ?? []).inclu
 
 // ---------- Start / sit ----------
 
-export function startSit(roster, league, players, values) {
+export function startSit(roster, league, players, values, locked = {}) {
   const ids = rosterIds(roster);
-  const best = optimalLineup(ids, league.roster_positions, players, values, 'week');
   const current = (roster.starters ?? []);
   const startSlots = league.roster_positions.map((s, i) => ({ s, i })).filter(x => isStartingSlot(x.s));
+  // A player whose game has started can't be benched, and a benched one can't be started.
+  const fixed = new Map();
+  startSlots.forEach((x, k) => { if (current[k] && locked[current[k]]) fixed.set(x.i, current[k]); });
+  const exclude = new Set(ids.filter(id => locked[id] && ![...fixed.values()].includes(id)));
+  const best = optimalLineup(ids, league.roster_positions, players, values, 'week', { fixed, exclude });
   const currentTotal = startSlots.reduce((t, _, k) => t + (values[current[k]]?.week ?? 0), 0);
   const currentSet = new Set(current);
   const moves = [];
@@ -244,7 +343,7 @@ export function startSit(roster, league, players, values) {
     moves.push({ start: toStart[k] ?? null, sit: toSit[k] ?? null,
       gain: round1((values[toStart[k]]?.week ?? 0) - (values[toSit[k]]?.week ?? 0)) });
   }
-  return { best, currentTotal: round1(currentTotal), gain: round1(best.total - currentTotal), moves };
+  return { best, currentTotal: round1(currentTotal), gain: round1(best.total - currentTotal), moves, locked };
 }
 
 // ---------- Roster analysis ----------
