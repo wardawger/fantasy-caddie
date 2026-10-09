@@ -103,3 +103,46 @@ test('fractional aggregate ranks interpolate between neighbouring rank values', 
   const a = mk(5), b = mk(6), mid = (() => { c.expertSets = [{ id: 's', name: 'S', week: c.week, rows: [{ name: p.name, team: p.team, pos: 'WR', rank: 5.5, posRank: 5.5 }] }]; finish(c); return c.values[p.id].breakdown.facts.expert.pts; })();
   assert.ok(a >= b && mid <= a && mid >= b, `${a} ${mid} ${b}`);
 });
+
+// ---- hardened fallbacks (shapes I'd expect if the sites differ from my first guess)
+const names = ['Josh Allen', 'Lamar Jackson', 'Jalen Hurts', 'Patrick Mahomes', 'Joe Burrow', 'Jayden Daniels', 'Baker Mayfield', 'Dak Prescott', 'Brock Purdy', 'Kyler Murray'];
+const tableHtml = (inline) => `<table class="TableBase-table"><thead><tr><th>Rank</th><th>Player</th>${inline ? '' : '<th>Pos</th><th>Team</th>'}</tr></thead><tbody>${
+  names.map((n, i) => `<tr><td>${i + 1}</td><td><span class="x">${n}</span> ${inline ? '<span>QB</span> <span>BUF</span>' : ''}</td>${inline ? '' : '<td>QB</td><td>BUF</td>'}</tr>`).join('')}</tbody></table>`;
+
+test('generic table parser handles separate columns and inline "Name POS TEAM" cells', () => {
+  for (const inline of [false, true]) {
+    const rows = R.parseTables(tableHtml(inline), 'QB');
+    assert.equal(rows.length, 10, `inline=${inline}`);
+    assert.deepEqual([rows[0].name, rows[0].pos, rows[0].team, rows[9].posRank], ['Josh Allen', 'QB', 'BUF', 10]);
+  }
+  assert.throws(() => R.parseTables('<table><tr><td>x</td></tr></table>'), /no ranking table/);
+});
+
+test('CBS falls back to tables when the class names differ; Draft Sharks to tables when no embedded JSON', () => {
+  assert.equal(R.parseCBS(tableHtml(true), 'QB').length, 10);
+  assert.equal(R.parseDraftSharks(tableHtml(false), 'QB').length, 10);
+});
+
+test('embedded JSON is found in ld+json, plain JSON scripts and window assignments', () => {
+  const arr = Array.from({ length: 12 }, (_, i) => ({ playerName: `P${i} Name`, positionAbbr: 'WR', teamAbbr: 'kc', overallRank: i + 1 }));
+  const pad = ' '.repeat(250);
+  const variants = [
+    `<script type="application/json">${JSON.stringify({ a: { b: arr } })}${pad}</script>`,
+    `<script>window.__DATA__ = ${JSON.stringify({ list: arr })};${pad}</script>`,
+    `<script type="application/ld+json">${JSON.stringify({ items: arr })}${pad}</script>`,
+  ];
+  for (const v of variants) { const rows = R.parseEmbeddedJSON(`<html>${v}</html>`); assert.equal(rows.length, 12); assert.equal(rows[0].team, 'KC'); }
+  assert.throws(() => R.parseEmbeddedJSON('<script>var x = 1;</script>'), /no embedded/);
+});
+
+test('debug mode reports status, structure and parse result without throwing', async () => {
+  const fake = async (url) => ({ ok: true, status: 200, headers: new Map([['content-type', 'text/html']]), text: async () => `<title>CBS Rankings</title><div class="CellPlayerName--long">x</div>${tableHtml(true)}` });
+  const d = await R.debugSource(R.SOURCES[1], { scoring: 'ppr', superflex: false, teams: 12, hasK: false, hasDef: false }, { season: '2026' }, fake);
+  assert.equal(d.source, 'cbs');
+  assert.ok(d.results.length >= 4);
+  const r = d.results[0];
+  assert.equal(r.status, 200); assert.equal(r.title, 'CBS Rankings'); assert.equal(r.tables, 1); assert.equal(r.parsed, 10);
+  assert.ok(r.sample.includes('Allen') && r.classes.some(([c]) => c === 'CellPlayerName--long'));
+  const bad = await R.debugSource(R.SOURCES[2], { scoring: 'ppr', superflex: false, teams: 12 }, {}, async () => { throw new Error('net down'); });
+  assert.equal(bad.results[0].error, 'net down');
+});

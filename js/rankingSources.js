@@ -7,7 +7,7 @@ import { normTeam } from './signals.js';
 
 const POS_ALIAS = { DST: 'DEF', 'D/ST': 'DEF', DEFENSE: 'DEF', PK: 'K' };
 const normPos = (p) => { const u = String(p ?? '').toUpperCase().trim(); return POS_ALIAS[u] ?? u; };
-const decode = (s) => String(s ?? '').replace(/&amp;/g, '&').replace(/&#0?39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ').replace(/<[^>]+>/g, '').trim();
+const decode = (s) => String(s ?? '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&#0?39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 
 /** Rank order → positional rank for rows that only have an overall rank. */
 export function withPosRanks(rows) {
@@ -91,13 +91,9 @@ export function parseCBS(html, kind) {
     n++;
     rows.push({ name: decode(m[1]), team: normTeam(m[3]), pos: normPos(m[2]), rank: n, posRank: null });
   }
-  if (!rows.length) {
-    // Defense/kicker tables sometimes use a short-name cell with no position span.
-    const re2 = /CellPlayerName--short[\s\S]{0,400}?<a[^>]*>([^<]+)<\/a>/g;
-    while ((m = re2.exec(html))) { n++; rows.push({ name: decode(m[1]), team: null, pos: kind === 'DST' ? 'DEF' : kind, rank: n, posRank: null }); }
-  }
-  if (!rows.length) throw new Error('no ranking rows found (page may be client-rendered)');
-  return withPosRanks(rows);
+  if (rows.length) return withPosRanks(rows);
+  for (const f of [() => parseTables(html, kind), () => parseEmbeddedJSON(html)]) { try { return f(); } catch { /* next */ } }
+  throw new Error('no ranking rows found (page may be client-rendered)');
 }
 
 function planCBS(p) {
@@ -113,36 +109,89 @@ function planCBS(p) {
 
 // ---------- Draft Sharks (embedded app data; mostly premium) ----------
 
-function findPlayerArray(node, depth = 0) {
-  if (!node || depth > 8 || typeof node !== 'object') return null;
+const NAME_KEYS = ['name', 'player_name', 'playerName', 'full_name', 'fullName', 'displayName', 'display_name'];
+const POS_KEYS = ['position', 'pos', 'player_position', 'positionAbbr', 'position_abbr', 'positionAbbreviation'];
+const RANK_KEYS = ['rank', 'overall_rank', 'overallRank', 'ovr_rank', 'ecr', 'adp', 'ranking', 'rank_ecr', 'projectedRank'];
+const TEAM_KEYS = ['team', 'team_abbr', 'teamAbbr', 'teamAbbreviation', 'abbreviation', 'team_id'];
+const pick = (o, keys) => { for (const k of keys) { const v = o?.[k]; if (v != null && typeof v !== 'object') return v; } return null; };
+
+/** Find the biggest array of player-like objects anywhere in a parsed JSON blob. */
+export function findPlayerArray(node, depth = 0, minLen = 10) {
+  if (!node || depth > 10 || typeof node !== 'object') return null;
   if (Array.isArray(node)) {
     const sample = node.slice(0, 5);
-    const nm = (o) => o?.name ?? o?.player_name ?? o?.playerName ?? o?.full_name;
-    const ps = (o) => o?.position ?? o?.pos ?? o?.player_position;
-    const rk = (o) => o?.rank ?? o?.overall_rank ?? o?.ovr_rank ?? o?.ecr ?? o?.adp;
-    if (node.length >= 20 && sample.every(o => o && typeof o === 'object' && nm(o) && ps(o) && rk(o) != null)) return node;
-    for (const x of node.slice(0, 50)) { const r = findPlayerArray(x, depth + 1); if (r) return r; }
+    if (node.length >= minLen && sample.every(o => o && typeof o === 'object' && pick(o, NAME_KEYS) && pick(o, POS_KEYS) && pick(o, RANK_KEYS) != null)) return node;
+    for (const x of node.slice(0, 60)) { const r = findPlayerArray(x, depth + 1, minLen); if (r) return r; }
     return null;
   }
-  for (const v of Object.values(node)) { const r = findPlayerArray(v, depth + 1); if (r) return r; }
-  return null;
+  let best = null;
+  for (const v of Object.values(node)) {
+    const r = findPlayerArray(v, depth + 1, minLen);
+    if (r && (!best || r.length > best.length)) best = r;
+  }
+  return best;
 }
 
-export function parseDraftSharks(html) {
-  const m = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  let data = null;
-  if (m) { try { data = JSON.parse(m[1]); } catch { /* fall through */ } }
-  data ??= extractJSONAfter(html, /__INITIAL_STATE__\s*=\s*/);
-  const arr = data && findPlayerArray(data);
-  if (!arr) throw new Error('no ranking data in page (rankings are likely premium or rendered client-side)');
-  const rows = arr.map((o, i) => ({
-    name: decode(o.name ?? o.player_name ?? o.playerName ?? o.full_name),
-    team: normTeam(o.team ?? o.team_abbr ?? o.teamAbbr),
-    pos: normPos(o.position ?? o.pos ?? o.player_position),
-    rank: Number(o.rank ?? o.overall_rank ?? o.ovr_rank ?? o.ecr ?? o.adp) || i + 1,
-    posRank: null,
-  })).filter(r => r.name && r.pos);
-  return withPosRanks(rows);
+const rowsFromArray = (arr) => withPosRanks(arr.map((o, i) => ({
+  name: decode(pick(o, NAME_KEYS)), team: normTeam(pick(o, TEAM_KEYS)), pos: normPos(pick(o, POS_KEYS)),
+  rank: Number(pick(o, RANK_KEYS)) || i + 1, posRank: null,
+})).filter(r => r.name && r.pos));
+
+/** Look through every <script> for JSON (script type json, ld+json, or `x = {...}` assignments) containing a player list. */
+export function parseEmbeddedJSON(html) {
+  const scripts = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)];
+  for (const [, , body] of scripts) {
+    const text = body.trim();
+    if (text.length < 200) continue;
+    const candidates = [];
+    if (text[0] === '{' || text[0] === '[') { try { candidates.push(JSON.parse(text)); } catch { /* not pure JSON */ } }
+    const assign = text.match(/(?:window\.[\w$.]+|(?:var|let|const)\s+[\w$]+)\s*=\s*(?=[{[])/);
+    if (assign) {
+      const j = extractJSONAfter(text.slice(assign.index + assign[0].length - 1), /^/);
+      if (j) candidates.push(j);
+    }
+    for (const c of candidates) {
+      const arr = findPlayerArray(c);
+      if (arr) { const rows = rowsFromArray(arr); if (rows.length >= 10) return rows; }
+    }
+  }
+  throw new Error('no embedded ranking data found');
+}
+
+/** Generic HTML-table parser: finds the table with the most rows that look like "rank, player, [pos], [team]". */
+export function parseTables(html, kind) {
+  const POS_RE = /\b(QB|RB|WR|TE|PK|K|DST|D\/ST|DEF)\b/i;
+  let best = [];
+  for (const t of html.match(/<table[\s\S]*?<\/table>/gi) ?? []) {
+    let cols = null;
+    const got = [];
+    for (const tr of t.match(/<tr[\s\S]*?<\/tr>/gi) ?? []) {
+      const cells = [...tr.matchAll(/<(t[hd])\b[^>]*>([\s\S]*?)<\/\1>/gi)].map(m => ({ tag: m[1].toLowerCase(), text: decode(m[2]) }));
+      if (!cells.length) continue;
+      if (cells.every(c => c.tag === 'th')) { cols = cells.map(c => c.text.toLowerCase()); continue; }
+      const idx = (re) => (cols ? cols.findIndex(c => re.test(c)) : -1);
+      let iRank = idx(/^(rk|rank|#|ovr|overall|ecr)/), iName = idx(/player|name/), iPos = idx(/^pos/), iTeam = idx(/^team/);
+      if (iRank < 0) iRank = cells.findIndex(c => /^\d{1,3}$/.test(c.text));
+      if (iName < 0) iName = cells.findIndex((c, i) => i !== iRank && /[A-Za-z]{2,}[ .'-][A-Za-z]{2,}/.test(c.text));
+      if (iRank < 0 || iName < 0) continue;
+      let name = cells[iName].text, pos = iPos >= 0 ? cells[iPos].text : null, team = iTeam >= 0 ? cells[iTeam].text : null;
+      // "Josh Allen QB BUF" style cells carry position and team inline.
+      const m = name.match(/^(.*?)\s+(QB|RB|WR|TE|PK|K|DST|D\/ST|DEF)\s+([A-Z]{2,4})$/i);
+      if (m) { name = m[1]; pos ??= m[2]; team ??= m[3]; }
+      pos = normPos((pos && POS_RE.test(pos) ? pos.match(POS_RE)[1] : null) ?? (kind === 'DST' ? 'DEF' : /^(QB|RB|WR|TE|K|DEF|DST)$/.test(kind ?? '') ? kind : ''));
+      if (!pos || !name) continue;
+      got.push({ name, team: team ? normTeam(team.replace(/[^A-Za-z]/g, '').slice(0, 4)) : null, pos, rank: Number(cells[iRank].text), posRank: null });
+    }
+    if (got.length > best.length) best = got;
+  }
+  if (best.length < 8) throw new Error('no ranking table found');
+  return withPosRanks(best);
+}
+
+export function parseDraftSharks(html, kind) {
+  const attempts = [() => parseEmbeddedJSON(html), () => parseTables(html, kind)];
+  for (const f of attempts) { try { return f(); } catch { /* try the next strategy */ } }
+  throw new Error('no ranking data in page (rankings are likely premium or rendered client-side)');
 }
 
 function planDraftSharks(p) {
@@ -204,4 +253,34 @@ export async function loadSource(src, profile, ctx, fetchFn) {
   const failures = tried.filter(t => !t.ok);
   const error = uniq.length ? null : (failures.at(-1)?.error ?? 'no data');
   return { id: src.id, name: src.name, weight: src.weight, home: src.home, rows: uniq, tried, error };
+}
+
+/**
+ * Diagnostics for a source: what each candidate URL returned and what the
+ * parsers made of it. Used by `?debug=<id>` on the function so a failing site
+ * can be diagnosed from one deploy. Only fetches the same fixed URLs as loadSource.
+ */
+export async function debugSource(src, profile, ctx, fetchFn) {
+  const out = [];
+  const urls = src.plan(profile, ctx).flatMap(i => i.candidates.map(url => ({ url, kind: i.kind })));
+  await Promise.all(urls.map(async ({ url, kind }) => {
+    const rec = { url, kind };
+    try {
+      const res = await fetchFn(url, { headers: { 'user-agent': 'FantasyCaddie/1.0 (personal fantasy tool)', accept: 'text/html,application/json' }, signal: AbortSignal.timeout(7000) });
+      const body = await res.text();
+      Object.assign(rec, { status: res.status, contentType: res.headers?.get?.('content-type') ?? null, bytes: body.length });
+      rec.title = (body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '').trim().slice(0, 120);
+      rec.tables = (body.match(/<table/gi) ?? []).length;
+      rec.scripts = [...body.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)].map(m => ({ attrs: m[1].trim().slice(0, 80), len: m[2].length }))
+        .filter(x => x.len > 500).slice(0, 12);
+      const classes = {};
+      for (const m of body.matchAll(/class="([^"]*(?:Player|Rank|rank|player)[^"]*)"/g)) for (const c of m[1].split(/\s+/)) if (/Player|Rank|rank|player/.test(c)) classes[c] = (classes[c] ?? 0) + 1;
+      rec.classes = Object.entries(classes).sort((a, b) => b[1] - a[1]).slice(0, 15);
+      const hit = body.search(/Mahomes|Chase|Allen|Jefferson|McCaffrey|Lamb/);
+      rec.sample = hit >= 0 ? body.slice(Math.max(0, hit - 500), hit + 900) : body.slice(0, 1200);
+      try { rec.parsed = src.parse(body, kind).length; } catch (e) { rec.parseError = e.message; }
+    } catch (e) { rec.error = e.message ?? String(e); }
+    out.push(rec);
+  }));
+  return { source: src.id, profile, results: out };
 }
