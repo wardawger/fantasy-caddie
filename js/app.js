@@ -24,7 +24,7 @@ const S = {
   screen: 'onboard', username: store.get('username') ?? '', user: null, leagues: [], error: null, step: '',
   ctx: null, me: null, tab: location.hash.slice(1) || 'overview',
   waiverPos: 'ALL', tradeMode: 'suggested', builder: { partner: null, give: new Set(), get: new Set() },
-  memo: {}, open: new Set(), expertWeight: store.get('xw') ?? 0.25, rankMsg: null,
+  memo: {}, expertWeight: store.get('xw') ?? 0.25, rankMsg: null,
   remote: { status: 'idle' }, srcOff: store.get('srcOff') ?? {},
 };
 
@@ -79,7 +79,7 @@ function startDemo() {
 }
 
 function startApp(ctx, me) {
-  S.memo = {}; S.open = new Set(); S.rankMsg = null;
+  S.memo = {}; S.rankMsg = null; closeSheet(true);
   S.ctx = ctx; S.remote = { status: 'idle' }; applyExpert();
   S.builder = { partner: ctx.rosters.find(r => r.roster_id !== me.roster_id)?.roster_id ?? null, give: new Set(), get: new Set() };
   setState({ ctx, me, screen: 'app' });
@@ -164,8 +164,7 @@ function playerRow(id, { trail = '', sub = '', notes = true, slot = null, intera
   const chips = [...(notes ? (v?.notes ?? []).map(noteChip) : [])];
   if (isLockedId(id)) chips.unshift(`<span class="chip">${icon('lock', 12)}Locked · game ${v?.gameState === 'post' ? 'final' : 'started'}</span>`);
   if (notes && recentNews(id).length) chips.push(`<span class="chip blue">${icon('news', 12)}News</span>`);
-  const open = why && S.open.has(id);
-  return `<li class="${interactive ? 'interactive' : ''} ${why ? 'has-why' : ''}">
+  return `<li class="${interactive ? 'interactive' : ''}">
     <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
     <div class="grow">
       <div class="name">${esc(p.name)}</div>
@@ -173,8 +172,7 @@ function playerRow(id, { trail = '', sub = '', notes = true, slot = null, intera
       ${chips.length ? `<div class="chips">${chips.join('')}</div>` : ''}${extra}
     </div>
     <div class="trail">${trail}</div>
-    ${why && v ? `<button class="why-toggle" data-why="${esc(id)}" aria-expanded="${open}" aria-label="Why ${esc(p.name)} is projected ${f1(v.week)} points">${icon('chevron', 18)}</button>` : ''}
-    ${open && v ? breakdownPanel(id) : ''}
+    ${why && v ? `<button class="why-toggle" data-why="${esc(id)}" aria-haspopup="dialog" aria-label="Why ${esc(p.name)} is projected ${f1(v.week)} points">${icon('chevron', 18)}</button>` : ''}
   </li>`;
 }
 function noteChip(n) {
@@ -556,8 +554,86 @@ function viewRoster() {
   </div>`;
 }
 
+// ---------- Bottom sheet (projection breakdown) ----------
+let sheet = null;
+const sheetRoot = () => document.getElementById('sheet-root');
+
+function sheetHtml(id) {
+  const p = P(id), v = V(id);
+  const delta = v.breakdown.final - v.breakdown.base;
+  return `<div class="sheet-backdrop" data-sheet-close></div>
+  <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1">
+    <header class="sheet-head">
+      <div class="sheet-grab" aria-hidden="true"><span></span></div>
+      <div class="row" style="gap:12px;align-items:center">
+        <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
+        <div class="grow" style="min-width:0"><h2 id="sheet-title" class="title3" style="margin:0">${esc(p.name)}</h2>
+          <div class="meta secondary subhead">${esc([p.team ?? 'FA', v.opponent ? `vs ${v.opponent}` : null, gameLabel(v)].filter(Boolean).join(' · '))}</div></div>
+        <div class="trail"><div class="title2 num">${f1(v.week)}</div><div class="caption num ${cls(delta)}">${signed(delta)} vs base</div></div>
+        <button class="sheet-close" data-sheet-close aria-label="Close">${icon('close', 20)}</button>
+      </div>
+    </header>
+    <div class="sheet-body">${breakdownPanel(id)}</div>
+  </section>`;
+}
+
+function openSheet(id) {
+  if (sheet || !V(id)) return;
+  const root = sheetRoot();
+  root.innerHTML = sheetHtml(id);
+  const bd = root.querySelector('.sheet-backdrop'), sh = root.querySelector('.sheet');
+  sheet = { id, bd, sh, closing: false };
+  document.body.classList.add('sheet-open');
+  sh.getBoundingClientRect(); // commit the off-screen start position before animating in
+  requestAnimationFrame(() => { bd.classList.add('open'); sh.classList.add('open'); sh.querySelector('.sheet-close').focus({ preventScroll: true }); });
+
+  // Drag the header down to dismiss (touch / pen / mouse).
+  const grab = sh.querySelector('.sheet-head');
+  let y0 = null, dy = 0;
+  grab.addEventListener('pointerdown', (e) => { if (e.target.closest('button')) return; y0 = e.clientY; dy = 0; sh.style.transition = 'none'; grab.setPointerCapture(e.pointerId); });
+  grab.addEventListener('pointermove', (e) => { if (y0 == null) return; dy = Math.max(0, e.clientY - y0); sh.style.transform = `translateY(${dy}px)`; });
+  const release = () => {
+    if (y0 == null) return;
+    y0 = null; sh.style.transition = '';
+    if (dy > 110) closeSheet(); else sh.style.transform = '';
+  };
+  grab.addEventListener('pointerup', release); grab.addEventListener('pointercancel', release);
+}
+
+function closeSheet(immediate = false) {
+  if (!sheet || sheet.closing) return;
+  const { id, bd, sh } = sheet;
+  sheet.closing = true;
+  const done = () => {
+    if (!sheet || sheet.sh !== sh) return;
+    sheetRoot().innerHTML = '';
+    document.body.classList.remove('sheet-open');
+    sheet = null;
+    if (!immediate) document.querySelector(`[data-why="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+  };
+  if (immediate) return done();
+  bd.classList.remove('open');
+  sh.style.transform = ''; sh.classList.remove('open');
+  sh.addEventListener('transitionend', (e) => { if (e.target === sh && e.propertyName === 'transform') done(); });
+  setTimeout(done, 450); // fallback: reduced motion or a missed transitionend
+}
+
+document.addEventListener('click', (e) => { if (e.target.closest('[data-sheet-close]')) closeSheet(); });
+document.addEventListener('keydown', (e) => {
+  if (!sheet) return;
+  if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
+  else if (e.key === 'Tab') { // keep focus inside the dialog
+    const f = [...sheet.sh.querySelectorAll('a[href],button:not([disabled])')];
+    if (!f.length) return;
+    const first = f[0], last = f.at(-1);
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === sheet.sh)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+
 // ---------- render & events ----------
 function render() {
+  if (S.screen !== 'app') closeSheet(true);
   const html = { onboard: renderOnboard, loading: renderLoading, leagues: renderLeagues, app: renderApp }[S.screen]();
   const y = window.scrollY;
   $app.innerHTML = html;
@@ -576,7 +652,7 @@ $app.addEventListener('click', (e) => {
   const el = e.target.closest('[data-tab],[data-action],[data-waiverpos],[data-trademode],[data-why],[data-xw]');
   if (!el) return;
   if (el.dataset.tab) { location.hash = el.dataset.tab; return; }
-  if (el.dataset.why) { const k = el.dataset.why; S.open.has(k) ? S.open.delete(k) : S.open.add(k); return render(); }
+  if (el.dataset.why) return openSheet(el.dataset.why);
   if (el.dataset.xw) { S.expertWeight = +el.dataset.xw; store.set('xw', S.expertWeight); applyExpert(); return render(); }
   if (el.dataset.waiverpos) return setState({ waiverPos: el.dataset.waiverpos });
   if (el.dataset.trademode) return setState({ tradeMode: el.dataset.trademode });
