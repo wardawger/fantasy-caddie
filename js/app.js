@@ -25,7 +25,7 @@ const S = {
   ctx: null, me: null, tab: location.hash.slice(1) || 'overview',
   waiverPos: 'ALL', tradeMode: 'suggested', builder: { partner: null, give: new Set(), get: new Set() },
   memo: {}, expertWeight: store.get('xw') ?? 0.25, rankMsg: null,
-  remote: { status: 'idle' }, srcOff: store.get('srcOff') ?? {},
+  menu: null, remote: { status: 'idle' }, srcOff: store.get('srcOff') ?? {},
 };
 
 // ---------- helpers ----------
@@ -213,6 +213,53 @@ function breakdownPanel(id) {
     <ul class="facts">${facts.join('')}</ul>
   </div>`;
 }
+// Custom dropdown: native <select> popups can't be styled consistently across desktop browsers,
+// which left light text on a light list. This one always uses the app's own surface and label colors.
+function dropdown(key, options, value, { label, up = false } = {}) {
+  const open = S.menu === key;
+  const cur = options.find(o => String(o.value) === String(value)) ?? options[0];
+  return `<div class="dd ${open ? 'open' : ''} ${up ? 'up' : ''}" data-dd="${key}">
+    <button type="button" class="field dd-btn" data-dd-toggle="${key}" aria-haspopup="listbox" aria-expanded="${open}" aria-label="${esc(label)}: ${esc(cur?.label)}">
+      <span class="dd-label">${esc(cur?.label)}</span>${icon('chevronDown', 18)}</button>
+    ${open ? `<ul class="dd-pop" role="listbox" aria-label="${esc(label)}">${options.map(o => { const sel = String(o.value) === String(value);
+      return `<li role="option" tabindex="-1" class="dd-opt ${sel ? 'sel' : ''}" aria-selected="${sel}" data-dd-opt="${key}" data-value="${esc(o.value)}"><span>${esc(o.label)}</span>${sel ? icon('check', 18) : ''}</li>`; }).join('')}</ul>` : ''}
+  </div>`;
+}
+
+function onDropdownPick(key, value) {
+  S.menu = null;
+  if (key === 'partner') { S.builder = { partner: +value, give: S.builder.give, get: new Set() }; render(); }
+  else if (key === 'league') { render(); if (value !== S.ctx.league.league_id) openLeague(value); }
+}
+
+// Segmented control with a blue thumb that slides between options (see positionThumbs).
+const segmented = (key, label, items, current, attr) =>
+  `<div class="segmented" role="group" aria-label="${esc(label)}" data-seg="${key}"><span class="seg-thumb" aria-hidden="true"></span>${items.map(([v, l]) =>
+    `<button ${attr}="${esc(v)}" aria-pressed="${String(v) === String(current)}">${esc(l)}</button>`).join('')}</div>`;
+
+const segPos = new Map();
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+function positionThumbs(animate = true) {
+  const present = new Set();
+  for (const seg of $app.querySelectorAll('.segmented[data-seg]')) {
+    const key = seg.dataset.seg; present.add(key);
+    const btn = seg.querySelector('button[aria-pressed="true"]'), thumb = seg.querySelector('.seg-thumb');
+    if (!btn || !thumb) continue;
+    const next = { x: btn.offsetLeft, y: btn.offsetTop, w: btn.offsetWidth, h: btn.offsetHeight };
+    const prev = segPos.get(key);
+    const place = (g) => { thumb.style.width = `${g.w}px`; thumb.style.height = `${g.h}px`; thumb.style.transform = `translate(${g.x}px, ${g.y}px)`; };
+    // Start from where the highlight was (the DOM was just rebuilt), then let it glide to the new option.
+    thumb.style.transition = 'none';
+    place(animate && prev && !reducedMotion() ? prev : next);
+    thumb.getBoundingClientRect();
+    thumb.style.transition = '';
+    place(next);
+    segPos.set(key, next);
+  }
+  for (const k of [...segPos.keys()]) if (!present.has(k)) segPos.delete(k);
+}
+window.addEventListener('resize', () => positionThumbs(false));
+
 const kpi = (label, ic, value, unit = '', delta = '') =>
   `<div class="card kpi"><div class="label">${icon(ic, 16)}${esc(label)}</div><div class="value">${value}${unit ? `<small>${unit}</small>` : ''}</div>${delta ? `<div class="delta">${delta}</div>` : ''}</div>`;
 const gradeColor = (g) => g.startsWith('A') ? 'var(--green)' : g.startsWith('B') ? 'var(--teal)' : g === 'C' ? 'var(--orange)' : 'var(--red)';
@@ -265,7 +312,7 @@ function renderApp() {
       <div class="brand"><div class="brand-mark">${icon('football', 20)}</div><div><div class="headline">Fantasy Caddie</div><div class="caption secondary">${esc(S.ctx.teamName(S.me.roster_id))}</div></div></div>
       ${nav}
       <div class="spacer"></div>
-      ${S.leagues.length > 1 ? `<label class="caption secondary" for="lg" style="padding:0 12px">LEAGUE</label><select id="lg" class="field" data-change="league">${S.leagues.map(l => `<option value="${esc(l.league_id)}" ${l.league_id === L.league_id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select>` : ''}
+      ${S.leagues.length > 1 ? `<div class="caption secondary" style="padding:0 12px">LEAGUE</div>${dropdown('league', S.leagues.map(l => ({ value: l.league_id, label: l.name })), L.league_id, { label: 'League', up: true })}` : ''}
       ${S.ctx.demo ? '' : `<button class="nav-item" data-action="refresh">${icon('refresh', 22)}<span>Refresh data</span></button>`}
       <button class="nav-item" data-action="signout">${icon('logout', 22)}<span>${S.ctx.demo ? 'Exit demo' : 'Sign out'}</span></button>
     </nav>
@@ -413,7 +460,7 @@ function expertCard() {
       <label class="btn"><span class="row" style="gap:8px">${icon('upload', 18)}Import CSV</span><input type="file" accept=".csv,text/csv" data-rankings hidden></label>
       ${R.status === 'ok' || R.status === 'error' ? `<button class="btn" data-action="refresh-ranks">${icon('refresh', 18)}Refresh</button>` : ''}
       <span class="grow"></span>
-      <div class="segmented" role="group" aria-label="Expert weight">${weights.map(([w, l]) => `<button data-xw="${w}" aria-pressed="${S.expertWeight === w}">${l}</button>`).join('')}</div>
+      ${segmented('xw', 'Expert weight', weights, S.expertWeight, 'data-xw')}
     </div>
     ${S.rankMsg ? `<p class="footnote ${S.rankMsg.err ? 'error' : 'secondary'}" style="margin:0 var(--s3) var(--s3)" role="status">${esc(S.rankMsg.text)}</p>` : ''}
   </section>`;
@@ -467,7 +514,7 @@ function viewWaivers() {
       ${kpi('Best ROS gain', 'chart', signed(all[0]?.gainRos ?? 0), 'pts', all[0] ? esc(P(all[0].id).name) : '')}
       ${kpi('Best for this week', 'calendar', signed(Math.max(0, ...all.map(x => x.gainWeek))), 'pts', 'Streaming pickup')}
     </div>
-    <div class="segmented" role="group" aria-label="Filter by position">${positions.map(p => `<button data-waiverpos="${p}" aria-pressed="${S.waiverPos === p}">${p === 'ALL' ? 'All' : p}</button>`).join('')}</div>
+    ${segmented('waiverpos', 'Filter by position', positions.map(p => [p, p === 'ALL' ? 'All' : p]), S.waiverPos, 'data-waiverpos')}
     <section class="card flush">
       <header><h2 class="title3">Waiver targets</h2>${f ? '<span class="caption secondary">Suggested blind bid</span>' : ''}</header>
       ${list.length ? `<ul class="list">${list.map(x => {
@@ -486,10 +533,7 @@ function viewWaivers() {
 
 function viewTrades() {
   return `<div class="stack">
-    <div class="segmented" role="group" aria-label="Trade mode">
-      <button data-trademode="suggested" aria-pressed="${S.tradeMode === 'suggested'}">Suggested</button>
-      <button data-trademode="build" aria-pressed="${S.tradeMode === 'build'}">Trade builder</button>
-    </div>
+    ${segmented('trademode', 'Trade mode', [['suggested', 'Suggested'], ['build', 'Trade builder']], S.tradeMode, 'data-trademode')}
     ${S.tradeMode === 'suggested' ? suggestedTrades() : tradeBuilder()}
   </div>`;
 }
@@ -550,8 +594,8 @@ function tradeBuilder() {
       <div class="footnote secondary" style="margin-top:var(--s2)">Trade value: you send <b class="num">${f1(e.giveVal)}</b>, you receive <b class="num">${f1(e.getVal)}</b> (points over replacement). Uneven player counts assume the team receiving extra players drops its lowest-value player.</div>`;
   }
   return `${sticky}<section class="card">${result}</section>
-    <div class="row wrap"><label class="subhead secondary" for="partner">Trade partner</label>
-      <select id="partner" class="field" style="max-width:360px" data-change="partner">${S.ctx.rosters.filter(r => r.roster_id !== S.me.roster_id).map(r => `<option value="${r.roster_id}" ${r.roster_id === B.partner ? 'selected' : ''}>${esc(S.ctx.teamName(r.roster_id))}</option>`).join('')}</select>
+    <div class="row wrap"><span class="subhead secondary" id="partner-label">Trade partner</span>
+      ${dropdown('partner', S.ctx.rosters.filter(r => r.roster_id !== S.me.roster_id).map(r => ({ value: r.roster_id, label: S.ctx.teamName(r.roster_id) })), B.partner, { label: 'Trade partner' })}
       <button class="btn plain" data-action="clear-trade">Clear</button></div>
     <div class="grid two">
       <section class="card flush"><header><h2 class="title3">You give</h2><span class="caption secondary">${B.give.size} selected</span></header>${pick(S.me, B.give, 'give')}</section>
@@ -707,6 +751,8 @@ function render() {
   const y = window.scrollY;
   $app.innerHTML = html;
   if (S.screen === 'app') window.scrollTo(0, y);
+  positionThumbs();
+  if (S.menu) requestAnimationFrame(() => $app.querySelector('.dd-opt.sel, .dd-opt')?.focus({ preventScroll: true }));
 }
 
 $app.addEventListener('submit', (e) => {
@@ -715,6 +761,30 @@ $app.addEventListener('submit', (e) => {
   e.preventDefault();
   S.username = form.username.value;
   lookupUser(S.username);
+});
+
+// Dropdowns: open/close, pick, keyboard navigation, and click-away.
+$app.addEventListener('click', (e) => {
+  const tog = e.target.closest('[data-dd-toggle]');
+  if (tog) { S.menu = S.menu === tog.dataset.ddToggle ? null : tog.dataset.ddToggle; render(); return; }
+  const opt = e.target.closest('[data-dd-opt]');
+  if (opt) { onDropdownPick(opt.dataset.ddOpt, opt.dataset.value); }
+});
+document.addEventListener('click', (e) => { if (S.menu && !e.target.closest('[data-dd]')) { S.menu = null; render(); } });
+$app.addEventListener('keydown', (e) => {
+  const dd = e.target.closest('[data-dd]');
+  if (!dd) return;
+  const key = dd.dataset.dd;
+  if (e.target.matches('[data-dd-toggle]') && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && S.menu !== key) { e.preventDefault(); S.menu = key; render(); return; }
+  if (S.menu !== key) return;
+  const opts = [...dd.querySelectorAll('.dd-opt')], i = opts.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown') { e.preventDefault(); opts[Math.min(i + 1, opts.length - 1)]?.focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); opts[Math.max(i - 1, 0)]?.focus(); }
+  else if (e.key === 'Home') { e.preventDefault(); opts[0]?.focus(); }
+  else if (e.key === 'End') { e.preventDefault(); opts.at(-1)?.focus(); }
+  else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) { e.preventDefault(); onDropdownPick(key, opts[i].dataset.value); }
+  else if (e.key === 'Escape') { e.preventDefault(); S.menu = null; render(); $app.querySelector(`[data-dd-toggle="${key}"]`)?.focus(); }
+  else if (e.key === 'Tab') { S.menu = null; render(); }
 });
 
 $app.addEventListener('click', (e) => {
@@ -766,15 +836,11 @@ $app.addEventListener('change', (e) => {
     const set = S.builder[t.dataset.pick];
     t.checked ? set.add(t.value) : set.delete(t.value);
     render();
-  } else if (t.dataset.change === 'partner') {
-    S.builder = { partner: +t.value, give: S.builder.give, get: new Set() };
-    render();
-  } else if (t.dataset.change === 'league') {
-    openLeague(t.value);
   }
 });
 
 window.addEventListener('hashchange', () => {
+  S.menu = null;
   S.tab = location.hash.slice(1) || 'overview';
   if (S.screen === 'app') { render(); window.scrollTo(0, 0); }
 });
