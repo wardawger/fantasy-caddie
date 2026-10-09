@@ -157,13 +157,14 @@ const ago = (iso) => {
 const gameLabel = (v) => v?.gameState === 'post' ? 'Final' : v?.gameState === 'in' ? 'In progress' : fmtKickoff(v?.kickoff);
 const recentNews = (id) => (S.ctx.news?.[id] ?? []).filter(n => !n.published || Date.now() - Date.parse(n.published) < 2 * 864e5);
 
-function playerRow(id, { trail = '', sub = '', notes = true, slot = null, interactive = false, extra = '', why = false } = {}) {
+function playerRow(id, { trail = '', sub = '', notes = true, slot = null, interactive = false, extra = '', why = false, compact = false } = {}) {
   const p = P(id); const v = V(id);
   if (!p) return `<li><span class="pbadge slot">${esc(slot ?? '—')}</span><div class="grow"><div class="name secondary">Empty</div></div></li>`;
-  const meta = [slot && slot !== p.pos ? slot.replace('_', ' ') : null, p.team ?? 'FA', v?.opponent ? `vs ${v.opponent}` : null, gameLabel(v), sub].filter(Boolean).join(' · ');
-  const chips = [...(notes ? (v?.notes ?? []).map(noteChip) : [])];
+  const meta = [slot && slot !== p.pos ? slot.replace('_', ' ') : null, p.team ?? 'FA', ...(compact ? [] : [v?.opponent ? `vs ${v.opponent}` : null, gameLabel(v)]), sub].filter(Boolean).join(' · ');
+  // Compact rows (roster list) keep only status chips; the info button has the rest.
+  const chips = [...(notes ? (v?.notes ?? []).filter(n => !compact || n.kind === 'injury' || n.kind === 'bye').map(noteChip) : [])];
   if (isLockedId(id)) chips.unshift(`<span class="chip">${icon('lock', 12)}Locked · game ${v?.gameState === 'post' ? 'final' : 'started'}</span>`);
-  if (notes && recentNews(id).length) chips.push(`<span class="chip blue">${icon('news', 12)}News</span>`);
+  if (notes && !compact && recentNews(id).length) chips.push(`<span class="chip blue">${icon('news', 12)}News</span>`);
   return `<li class="${interactive ? 'interactive' : ''}">
     <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
     <div class="grow">
@@ -319,13 +320,27 @@ function viewOverview() {
         }).join('')}</div>
       </section>
     </div>
-    <section class="card flush"><header><h2 class="title3">Power rankings</h2><span class="caption secondary">Projected ROS starter points</span></header>
+    <section class="card flush"><header><h2 class="title3">Power rankings</h2><span class="caption secondary only-desktop">Projected ROS starter points</span></header>
       <div class="scroll-x">${powerTable(a, 6)}</div>
     </section>
   </div>`;
 }
 
 function powerTable(a, limit = Infinity) {
+  return `<div class="only-desktop">${powerTableDesktop(a, limit)}</div>${powerListMobile(a, limit)}`;
+}
+
+function powerListMobile(a, limit = Infinity) {
+  const rows = [...a.teams].sort((x, y) => x.rank - y.rank).slice(0, limit);
+  if (!rows.some(t => t.rosterId === S.me.roster_id)) rows.push(myTeam());
+  const max = Math.max(...a.teams.map(t => t.ros));
+  return `<ul class="list plain only-mobile">${rows.map(t => { const r = S.ctx.rosters.find(x => x.roster_id === t.rosterId); const me = t.rosterId === S.me.roster_id;
+    return `<li class="${me ? 'me-row' : ''}"><span class="num secondary" style="width:20px;text-align:center;flex:none">${t.rank}</span>
+      <div class="grow"><div class="name" style="${me ? 'font-weight:700' : ''}">${esc(S.ctx.teamName(t.rosterId))}</div><div class="bar" style="margin-top:6px"><span style="width:${(t.ros / max * 100).toFixed(1)}%"></span></div></div>
+      <div class="trail"><div class="big num">${Math.round(t.ros)}</div><div class="caption secondary num">${r.settings?.wins ?? 0}–${r.settings?.losses ?? 0} · wk ${f1(t.weekly)}</div></div></li>`; }).join('')}</ul>`;
+}
+
+function powerTableDesktop(a, limit = Infinity) {
   const rows = [...a.teams].sort((x, y) => x.rank - y.rank).slice(0, limit);
   if (!rows.some(t => t.rosterId === S.me.roster_id)) rows.push(myTeam());
   const max = Math.max(...a.teams.map(t => t.ros));
@@ -510,9 +525,11 @@ function tradeBuilder() {
       <span class="pbadge ${p.pos}">${p.pos}</span><span class="grow" style="min-width:0"><span class="name" style="display:block">${esc(p.name)}</span><span class="meta" style="display:block">${p.team ?? 'FA'}${p.injury ? ' · ' + esc(p.injury) : ''}</span></span>
       <span class="trail"><span class="num footnote" style="display:block">${f1(V(id)?.ros)}</span><span class="caption secondary">ROS</span></span></label></li>`;
   }).join('')}</ul>`;
+  let sticky = '';
   let result = `<div class="empty">${icon('slider', 40)}<div>Select players on both sides to grade the trade.</div></div>`;
   if (them && (B.give.size || B.get.size)) {
     const e = E.evaluateTrade({ myRoster: S.me, theirRoster: them, give: [...B.give], get: [...B.get], league: S.ctx.league, players: S.ctx.players, values: S.ctx.values, week: S.ctx.week });
+    sticky = `<div class="trade-sticky only-mobile" role="status" aria-label="Trade grade">${gradeRing(e.grade, gradePct[e.grade], true)}<div class="grow" style="min-width:0"><div class="headline num ${cls(e.myDelta)}">${signed(e.myDelta)} ROS pts</div><div class="caption secondary num">${signed(e.perWeek)}/wk · ~${e.accept}% accept</div></div></div>`;
     const verdict = e.myDelta > 0 && e.theirDelta > 0 ? 'Win–win: both lineups improve. Lead with this one.'
       : e.myDelta > 0 && e.accept >= 50 ? 'Good for you and likely acceptable on value.'
       : e.myDelta > 0 ? 'Helps you, but they give up more value than they get. Consider adding a sweetener.'
@@ -527,7 +544,7 @@ function tradeBuilder() {
       </div>
       <div class="footnote secondary" style="margin-top:var(--s2)">Trade value: you send <b class="num">${f1(e.giveVal)}</b>, you receive <b class="num">${f1(e.getVal)}</b> (points over replacement). Uneven player counts assume the team receiving extra players drops its lowest-value player.</div>`;
   }
-  return `<section class="card">${result}</section>
+  return `${sticky}<section class="card">${result}</section>
     <div class="row wrap"><label class="subhead secondary" for="partner">Trade partner</label>
       <select id="partner" class="field" style="max-width:360px" data-change="partner">${S.ctx.rosters.filter(r => r.roster_id !== S.me.roster_id).map(r => `<option value="${r.roster_id}" ${r.roster_id === B.partner ? 'selected' : ''}>${esc(S.ctx.teamName(r.roster_id))}</option>`).join('')}</select>
       <button class="btn plain" data-action="clear-trade">Clear</button></div>
@@ -542,14 +559,15 @@ function viewRoster() {
   const starters = myTeam().lineup.starters;
   return `<div class="stack">
     <section class="card flush"><header><h2 class="title3">My roster</h2><span class="caption secondary">Sorted by rest-of-season value</span></header>
-      <div class="scroll-x"><table class="tbl"><thead><tr><th>Player</th><th>Status</th><th class="r">Wk ${S.ctx.week}</th><th class="r">Pts/G</th><th class="r">ROS</th><th class="r">Value</th></tr></thead><tbody>
+      <ul class="list only-mobile">${ids.map(id => playerRow(id, { why: true, compact: true, sub: P(id).age ? `${P(id).age}y` : '', trail: `<div class="big num">${f1(V(id)?.week)}</div><div class="caption secondary num">ROS ${Math.round(V(id)?.ros ?? 0)}</div>` })).join('')}</ul>
+      <div class="scroll-x only-desktop"><table class="tbl"><thead><tr><th>Player</th><th>Status</th><th class="r">Wk ${S.ctx.week}</th><th class="r">Pts/G</th><th class="r">ROS</th><th class="r">Value</th></tr></thead><tbody>
       ${ids.map(id => { const p = P(id); const v = V(id) ?? {};
         return `<tr><td><div class="row"><span class="pbadge ${p.pos}" style="width:32px;height:32px;border-radius:8px;font-size:11px">${p.pos}</span><div><div>${esc(p.name)}</div><div class="caption secondary">${p.team ?? 'FA'}${p.age ? ` · ${p.age}y` : ''}</div></div></div></td>
         <td>${p.injury ? `<span class="chip red">${esc(p.injury)}</span>` : starters.has(id) ? '<span class="chip green">Core starter</span>' : '<span class="chip">Depth</span>'}</td>
         <td class="r num">${f1(v.week)}</td><td class="r num">${f1(v.rate)}</td><td class="r num">${f1(v.ros)}</td><td class="r num">${f1(v.vor)}</td></tr>`; }).join('')}
       </tbody></table></div>
     </section>
-    <section class="card flush"><header><h2 class="title3">League power rankings</h2><span class="caption secondary">Position columns show league rank</span></header><div class="scroll-x">${powerTable(analysis())}</div></section>
+    <section class="card flush"><header><h2 class="title3">League power rankings</h2><span class="caption secondary only-desktop">Position columns show league rank</span></header><div class="scroll-x">${powerTable(analysis())}</div></section>
     <p class="footnote secondary" style="margin:0 8px">“Value” is projected points above a replacement-level player at the same position, which is what other managers effectively pay for in a trade.</p>
   </div>`;
 }
