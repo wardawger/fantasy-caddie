@@ -172,7 +172,7 @@ function playerRow(id, { trail = '', sub = '', notes = true, slot = null, intera
       ${chips.length ? `<div class="chips">${chips.join('')}</div>` : ''}${extra}
     </div>
     <div class="trail">${trail}</div>
-    ${why && v ? `<button class="why-toggle" data-why="${esc(id)}" aria-haspopup="dialog" aria-label="Why ${esc(p.name)} is projected ${f1(v.week)} points">${icon('chevron', 18)}</button>` : ''}
+    ${why && v ? `<button class="why-toggle" data-why="${esc(id)}" aria-haspopup="dialog" aria-label="Why ${esc(p.name)} is projected ${f1(v.week)} points">${icon('info', 24)}</button>` : ''}
   </li>`;
 }
 function noteChip(n) {
@@ -567,12 +567,12 @@ function sheetHtml(id) {
       <div class="sheet-grab" aria-hidden="true"><span></span></div>
       <div class="row" style="gap:12px;align-items:center">
         <span class="pbadge ${esc(p.pos)}">${esc(p.pos)}</span>
-        <div class="grow" style="min-width:0"><h2 id="sheet-title" class="title3" style="margin:0">${esc(p.name)}</h2>
+        <div style="flex:1;min-width:0"><h2 id="sheet-title" class="title3" style="margin:0">${esc(p.name)}</h2>
           <div class="meta secondary subhead">${esc([p.team ?? 'FA', v.opponent ? `vs ${v.opponent}` : null, gameLabel(v)].filter(Boolean).join(' · '))}</div></div>
         <div class="trail"><div class="title2 num">${f1(v.week)}</div><div class="caption num ${cls(delta)}">${signed(delta)} vs base</div></div>
-        <button class="sheet-close" data-sheet-close aria-label="Close">${icon('close', 20)}</button>
       </div>
     </header>
+    <button class="sheet-close" data-sheet-close aria-label="Close">${icon('close', 20)}</button>
     <div class="sheet-body">${breakdownPanel(id)}</div>
   </section>`;
 }
