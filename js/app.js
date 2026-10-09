@@ -241,10 +241,10 @@ const segPos = new Map();
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 function positionThumbs(animate = true) {
   const present = new Set();
-  for (const seg of $app.querySelectorAll('.segmented[data-seg]')) {
+  for (const seg of $app.querySelectorAll('[data-seg]')) {
     const key = seg.dataset.seg; present.add(key);
-    const btn = seg.querySelector('button[aria-pressed="true"]'), thumb = seg.querySelector('.seg-thumb');
-    if (!btn || !thumb) continue;
+    const btn = seg.querySelector('button[aria-pressed="true"], button[aria-current="page"]'), thumb = seg.querySelector('.seg-thumb');
+    if (!btn || !thumb || !btn.offsetWidth) continue; // hidden (e.g. the phone tab bar on desktop)
     const next = { x: btn.offsetLeft, y: btn.offsetTop, w: btn.offsetWidth, h: btn.offsetHeight };
     const prev = segPos.get(key);
     const place = (g) => { thumb.style.width = `${g.w}px`; thumb.style.height = `${g.h}px`; thumb.style.transform = `translate(${g.x}px, ${g.y}px)`; };
@@ -257,6 +257,16 @@ function positionThumbs(animate = true) {
     segPos.set(key, next);
   }
   for (const k of [...segPos.keys()]) if (!present.has(k)) segPos.delete(k);
+}
+// A re-render can land mid-glide (e.g. a screen that renders again a moment later). Before the DOM is
+// replaced, record where each highlight visually is so the next one continues from there instead of snapping.
+function captureThumbs() {
+  for (const seg of $app.querySelectorAll('[data-seg]')) {
+    const thumb = seg.querySelector('.seg-thumb');
+    if (!thumb || !thumb.offsetWidth) continue;
+    const cs = getComputedStyle(thumb), m = new DOMMatrix(cs.transform);
+    segPos.set(seg.dataset.seg, { x: m.m41, y: m.m42, w: parseFloat(cs.width), h: parseFloat(cs.height) });
+  }
 }
 window.addEventListener('resize', () => positionThumbs(false));
 
@@ -328,7 +338,7 @@ function renderApp() {
       </div>
       ${views[tab.id]()}
     </main>
-    <nav class="tabbar" aria-label="Sections">${TABS.map(t => `<button data-tab="${t.id}" ${t.id === tab.id ? 'aria-current="page"' : ''}>${icon(t.icon, 24)}<span>${t.label}</span></button>`).join('')}</nav>
+    <nav class="tabbar" aria-label="Sections" data-seg="tabbar"><span class="seg-thumb tab-thumb" aria-hidden="true"></span>${TABS.map(t => `<button data-tab="${t.id}" ${t.id === tab.id ? 'aria-current="page"' : ''}>${icon(t.icon, 24)}<span>${t.label}</span></button>`).join('')}</nav>
   </div>`;
 }
 
@@ -749,6 +759,7 @@ function render() {
   if (S.screen !== 'app') closeSheet(true);
   const html = { onboard: renderOnboard, loading: renderLoading, leagues: renderLeagues, app: renderApp }[S.screen]();
   const y = window.scrollY;
+  captureThumbs();
   $app.innerHTML = html;
   if (S.screen === 'app') window.scrollTo(0, y);
   positionThumbs();
